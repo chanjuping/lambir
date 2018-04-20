@@ -1,0 +1,5191 @@
+---
+title: 'ANOVA tables: Trait Values and Plasticity (Original PI)'
+author: "Chan, Ju Ping."
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r loadlib, warning=F, echo=F, message=F, include=F}
+require(Rmisc)
+require(lme4)
+require(lmerTest)
+# require(reshape)
+require(AICcmodavg)
+require(reshape2)
+require(ggplot2)
+require(smatr)
+require(GGally)
+require(ggrepel)
+# require(multcomp)
+# require(multcompView)
+# require(MASS)
+require(dplyr)
+
+```
+
+```{r loadData, warning=F, echo=F, message=F, include=F}
+master=read.csv("/media/sf_Share/Lambir/data/wd/master.csv")
+# master=subset(master, habitat!="gen")
+str(master)
+
+attach(master)
+
+# Choose columns to subset
+names.list = c("plot",
+               "subplot",
+               "soil",
+               "light",
+               "species",
+               "habitat",
+               "seed_sow",
+               "harvested",
+               "census_2010", #for diameter, leaves, height
+               "height_2010",
+               "height_2012",
+               "avg_d_2010",
+               "avg_d_2012",
+               "nleaves_2010",
+               "nleaves_2012",
+               "stem_density",
+               "root_density",
+               "mean_sla",
+               "avg_thickness_mm",
+               "leaf_weight",
+               "stem_weight",
+               "root_weight",
+               "total_above",
+               "total_bm",
+               "lmr",
+               "rmr",
+               "sum_leaf_area",
+               "mean_leaf_area",
+               "leaf_vol",
+               "lar",
+               "leaf_density",
+               "depth",
+               "srl_weight",
+               "sr_length",
+               "sr_proj.area",
+               "sr_surf.area",
+               "sr_diameter",
+               "sr_vol",
+               "perCarbon",
+               "perNitrogen"
+)
+
+detach(master)
+
+str(master)
+
+# Subset variables for analysis 
+sub_master=master[names.list]
+str(sub_master)
+
+# Plot as factor
+sub_master$plot=as.factor(sub_master$plot)
+
+# Coerce dates as dates
+sub_master$seed_sow=as.Date(sub_master$seed_sow)
+sub_master$census_2010=as.Date(sub_master$census_2010)
+sub_master$harvested=as.Date(sub_master$harvested)
+
+# add biomass percentages
+sub_master$per_above=(sub_master$total_above)/(sub_master$total_bm)
+sub_master$per_stem_weight=(sub_master$stem_weight)/(sub_master$total_bm)
+
+# add diameter_rgr
+sub_master$diameter_rgr=
+  (log(sub_master$avg_d_2012)-log(sub_master$avg_d_2010))/
+  as.numeric((sub_master$harvested-sub_master$census_2010)/365.25)
+
+# add height_rgr
+sub_master$height_rgr=
+  (log(sub_master$height_2012)-log(sub_master$height_2010))/
+  as.numeric((sub_master$harvested-sub_master$census_2010)/365.25)
+
+# add nleaf_rgr
+sub_master$nleaf_rgr=
+  (log(sub_master$nleaves_2012)-log(sub_master$nleaves_2010))/
+  as.numeric((sub_master$harvested-sub_master$census_2010)/365.25)
+
+# add total_bm_agr
+sub_master$total_bm_agr=
+  (sub_master$total_bm)/
+  as.numeric((sub_master$harvested-sub_master$seed_sow)/365.25)
+
+# add number absolute growth rate, nleaf_gr
+sub_master$nleaf_gr=
+  (sub_master$nleaves_2012)/
+  as.numeric((sub_master$harvested-sub_master$seed_sow)/365.25)
+
+# add leaf area growth rate, leaf_area_agr
+sub_master$leaf_area_agr=
+  (sub_master$sum_leaf_area)/
+  as.numeric((sub_master$harvested-sub_master$seed_sow)/365.25)
+
+# add fine root length
+sub_master$frl = sub_master$sr_length
+
+# add specific root length (m/g), Kochsiek, 2013 from sr_length(cm3) and srl_weight (g)
+sub_master$srl =
+  (sub_master$sr_length/100)/
+  (sub_master$srl_weight)
+
+# add C/N ratio
+
+sub_master$CNR = 
+  sub_master$perCarbon/
+  sub_master$perNitrogen
+
+# # add specific root projected area (cm2/g)
+# sub_master$srpa =
+#   (sub_master$sr_proj.area)/
+#   (sub_master$srl_weight)
+# 
+# # add specific root surface area (cm2/g)
+# sub_master$srsa =
+#   (sub_master$sr_surf.area)/
+#   (sub_master$srl_weight)
+# 
+# # add specific root diameter (mm/g)
+# sub_master$srd =
+#   (sub_master$sr_diameter)/
+#   (sub_master$srl_weight)
+# 
+# # add specific root volume (cm3/g)
+# sub_master$srv =
+#   (sub_master$sr_vol)/
+#   (sub_master$srl_weight)
+
+# add specific fine root mass ratio
+sub_master$FRMR =
+  (sub_master$srl_weight)/
+  (sub_master$total_bm)
+
+# Where habitat and soil match, make home, else away
+sub_master$hab.soil = with(sub_master, interaction(habitat, soil, sep="x"))
+sub_master$home_away=sub_master$hab.soil
+
+sub_master$home_away=gsub("cxc", "Home", sub_master$home_away)
+sub_master$home_away=gsub("sxs", "Home", sub_master$home_away)
+sub_master$home_away=gsub("cxs", "Away", sub_master$home_away)
+sub_master$home_away=gsub("sxc", "Away", sub_master$home_away)
+
+unique(sub_master$home_away)
+
+# Create combination of all three treatments, habitat, soil, and light.
+sub_master$hab.soil.light = with(sub_master, interaction(habitat, soil, light, sep = "x"))
+
+# setwd("~/Documents/Lambir_Project/Statistics/pls_index_test/")
+
+# Plasticity function
+Fun.plas <- function(x, y) {
+  Plas <- (x-y)/sqrt(
+    x*y
+  )  
+  return(Plas)
+}
+
+# Stem density
+stem_density=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  den=master$stem_density
+  )
+
+hist(stem_density$den)
+shapiro.test(stem_density$den)
+
+agg_stem_density = aggregate(den ~ plot*species*habitat*soil*light,
+                 data=stem_density,
+                 FUN=mean)
+
+stem_density_all = aggregate(den~species*habitat*soil*light,
+                      data=agg_stem_density,
+                      FUN=mean)
+
+stem_density_all$soil.light = with(stem_density_all, interaction(soil, light, sep="x"))
+
+str(stem_density_all)
+
+mstem_density=melt(stem_density_all)
+
+cstem_density=dcast(mstem_density, species*habitat ~ soil.light)
+
+plas_stem_density=cstem_density
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_stem_density$C.gu = Fun.plas(x=cstem_density$cxg, y=cstem_density$cxu)
+plas_stem_density$S.gu = Fun.plas(x=cstem_density$sxg, y=cstem_density$sxu)
+plas_stem_density$G.cs = Fun.plas(x=cstem_density$cxg, y=cstem_density$sxg)
+plas_stem_density$U.cs = Fun.plas(x=cstem_density$cxu, y=cstem_density$sxu)
+
+### End stem density for now
+
+# Root density
+
+root_density=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  den=master$root_density
+)
+
+hist(root_density$den)
+shapiro.test(root_density$den)
+
+agg_root_density = aggregate(den ~ plot*species*habitat*soil*light,
+                     data=root_density,
+                     FUN=mean)
+
+root_density_all = aggregate(den~species*habitat*soil*light,
+                     data=agg_root_density,
+                     FUN=mean)
+
+root_density_all$soil.light = with(root_density_all, interaction(soil, light, sep="x"))
+
+str(root_density_all)
+
+mroot_density=melt(root_density_all)
+
+croot_density=dcast(mroot_density, species*habitat ~ soil.light)
+
+plas_root_density=croot_density
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_root_density$C.gu = Fun.plas(x=croot_density$cxg, y=croot_density$cxu)
+plas_root_density$S.gu = Fun.plas(x=croot_density$sxg, y=croot_density$sxu)
+plas_root_density$G.cs = Fun.plas(x=croot_density$cxg, y=croot_density$sxg)
+plas_root_density$U.cs = Fun.plas(x=croot_density$cxu, y=croot_density$sxu)
+
+### End root density
+
+# mean_sla
+mean_sla=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  sla=master$mean_sla
+)
+
+hist(mean_sla$sla)
+shapiro.test(mean_sla$sla)
+
+agg_mean_sla = aggregate(sla ~ plot*species*habitat*soil*light,
+                     data=mean_sla,
+                     FUN=mean)
+
+mean_sla_all = aggregate(sla~species*habitat*soil*light,
+                     data=agg_mean_sla,
+                     FUN=mean)
+
+mean_sla_all$soil.light = with(mean_sla_all, interaction(soil, light, sep="x"))
+
+str(mean_sla_all)
+
+mmean_sla=melt(mean_sla_all)
+
+cmean_sla=dcast(mmean_sla, species*habitat ~ soil.light)
+
+plas_mean_sla=cmean_sla
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_mean_sla$C.gu = Fun.plas(x=cmean_sla$cxg, y=cmean_sla$cxu)
+plas_mean_sla$S.gu = Fun.plas(x=cmean_sla$sxg, y=cmean_sla$sxu)
+plas_mean_sla$G.cs = Fun.plas(x=cmean_sla$cxg, y=cmean_sla$sxg)
+plas_mean_sla$U.cs = Fun.plas(x=cmean_sla$cxu, y=cmean_sla$sxu)
+
+### End mean_sla for now
+
+# Leaf thickness
+
+avg_thickness_mm=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  leaf.thickness=master$avg_thickness_mm
+)
+
+hist(avg_thickness_mm$leaf.thickness)
+
+agg_avg_thickness_mm = aggregate(leaf.thickness ~ plot*species*habitat*soil*light,
+                    data=avg_thickness_mm,
+                    FUN=mean)
+
+avg_thickness_mm_all = aggregate(leaf.thickness~species*habitat*soil*light,
+                    data=agg_avg_thickness_mm,
+                    FUN=mean)
+
+avg_thickness_mm_all$soil.light = with(avg_thickness_mm_all, interaction(soil, light, sep="x"))
+
+str(avg_thickness_mm_all)
+
+mavg_thickness_mm_all=melt(avg_thickness_mm_all)
+
+cavg_thickness_mm_all=dcast(mavg_thickness_mm_all, species*habitat ~ soil.light)
+
+plas_avg_thickness_mm=cavg_thickness_mm_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_avg_thickness_mm$C.gu = Fun.plas(x=plas_avg_thickness_mm$cxg, y=plas_avg_thickness_mm$cxu)
+plas_avg_thickness_mm$S.gu = Fun.plas(x=plas_avg_thickness_mm$sxg, y=plas_avg_thickness_mm$sxu)
+plas_avg_thickness_mm$G.cs = Fun.plas(x=plas_avg_thickness_mm$cxg, y=plas_avg_thickness_mm$sxg)
+plas_avg_thickness_mm$U.cs = Fun.plas(x=plas_avg_thickness_mm$cxu, y=plas_avg_thickness_mm$sxu)
+
+# End leaf thickness
+
+# Start leaf weight
+
+# Leaf weight
+
+leaf_weight=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  leaf.weight=master$leaf_weight
+)
+
+hist(leaf_weight$leaf.weight)
+shapiro.test(leaf_weight$leaf.weight)
+
+agg_leaf_weight = aggregate(leaf.weight ~ plot*species*habitat*soil*light,
+                               data=leaf_weight,
+                               FUN=mean)
+
+leaf_weight_all = aggregate(leaf.weight~species*habitat*soil*light,
+                               data=agg_leaf_weight,
+                               FUN=mean)
+
+leaf_weight_all$soil.light = with(leaf_weight_all, interaction(soil, light, sep="x"))
+
+str(leaf_weight_all)
+
+mleaf_weight_all=melt(leaf_weight_all)
+
+cleaf_weight_all=dcast(mleaf_weight_all, species*habitat ~ soil.light)
+
+plas_leaf_weight=cleaf_weight_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_leaf_weight$C.gu = Fun.plas(x=plas_leaf_weight$cxg, y=plas_leaf_weight$cxu)
+plas_leaf_weight$S.gu = Fun.plas(x=plas_leaf_weight$sxg, y=plas_leaf_weight$sxu)
+plas_leaf_weight$G.cs = Fun.plas(x=plas_leaf_weight$cxg, y=plas_leaf_weight$sxg)
+plas_leaf_weight$U.cs = Fun.plas(x=plas_leaf_weight$cxu, y=plas_leaf_weight$sxu)
+
+# End leaf weight
+
+# Stem weight
+
+stem_weight=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  stem.weight=master$stem_weight
+)
+
+hist(stem_weight$stem.weight)
+
+agg_stem_weight = aggregate(stem.weight ~ plot*species*habitat*soil*light,
+                            data=stem_weight,
+                            FUN=mean)
+
+stem_weight_all = aggregate(stem.weight~species*habitat*soil*light,
+                            data=agg_stem_weight,
+                            FUN=mean)
+
+stem_weight_all$soil.light = with(stem_weight_all, interaction(soil, light, sep="x"))
+
+str(stem_weight_all)
+
+mstem_weight_all=melt(stem_weight_all)
+
+cstem_weight_all=dcast(mstem_weight_all, species*habitat ~ soil.light)
+
+plas_stem_weight=cstem_weight_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_stem_weight$C.gu = Fun.plas(x=plas_stem_weight$cxg, y=plas_stem_weight$cxu)
+plas_stem_weight$S.gu = Fun.plas(x=plas_stem_weight$sxg, y=plas_stem_weight$sxu)
+plas_stem_weight$G.cs = Fun.plas(x=plas_stem_weight$cxg, y=plas_stem_weight$sxg)
+plas_stem_weight$U.cs = Fun.plas(x=plas_stem_weight$cxu, y=plas_stem_weight$sxu)
+
+# End stem weight
+
+# root weight
+
+root_weight=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  root.weight=master$root_weight
+)
+
+hist(root_weight$root.weight)
+
+agg_root_weight = aggregate(root.weight ~ plot*species*habitat*soil*light,
+                            data=root_weight,
+                            FUN=mean)
+
+root_weight_all = aggregate(root.weight~species*habitat*soil*light,
+                            data=agg_root_weight,
+                            FUN=mean)
+
+root_weight_all$soil.light = with(root_weight_all, interaction(soil, light, sep="x"))
+
+str(root_weight_all)
+
+mroot_weight_all=melt(root_weight_all)
+
+croot_weight_all=dcast(mroot_weight_all, species*habitat ~ soil.light)
+
+plas_root_weight=croot_weight_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_root_weight$C.gu = Fun.plas(x=plas_root_weight$cxg, y=plas_root_weight$cxu)
+plas_root_weight$S.gu = Fun.plas(x=plas_root_weight$sxg, y=plas_root_weight$sxu)
+plas_root_weight$G.cs = Fun.plas(x=plas_root_weight$cxg, y=plas_root_weight$sxg)
+plas_root_weight$U.cs = Fun.plas(x=plas_root_weight$cxu, y=plas_root_weight$sxu)
+
+# End root weight
+
+# total_above
+
+total_above=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  total.above=master$total_above
+)
+
+hist(total_above$total.above)
+
+agg_total_above = aggregate(total.above ~ plot*species*habitat*soil*light,
+                            data=total_above,
+                            FUN=mean)
+
+total_above_all = aggregate(total.above~species*habitat*soil*light,
+                            data=agg_total_above,
+                            FUN=mean)
+
+total_above_all$soil.light = with(total_above_all, interaction(soil, light, sep="x"))
+
+str(total_above_all)
+
+mtotal_above_all=melt(total_above_all)
+
+ctotal_above_all=dcast(mtotal_above_all, species*habitat ~ soil.light)
+
+plas_total_above=ctotal_above_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_total_above$C.gu = Fun.plas(x=plas_total_above$cxg, y=plas_total_above$cxu)
+plas_total_above$S.gu = Fun.plas(x=plas_total_above$sxg, y=plas_total_above$sxu)
+plas_total_above$G.cs = Fun.plas(x=plas_total_above$cxg, y=plas_total_above$sxg)
+plas_total_above$U.cs = Fun.plas(x=plas_total_above$cxu, y=plas_total_above$sxu)
+
+# End total_above
+
+# total_bm
+
+total_bm=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  total.bm=master$total_bm
+)
+
+hist(total_bm$total.bm)
+
+agg_total_bm = aggregate(total.bm ~ plot*species*habitat*soil*light,
+                         data=total_bm,
+                         FUN=mean)
+
+total_bm_all = aggregate(total.bm~species*habitat*soil*light,
+                         data=agg_total_bm,
+                         FUN=mean)
+
+total_bm_all$soil.light = with(total_bm_all, interaction(soil, light, sep="x"))
+
+str(total_bm_all)
+
+mtotal_bm_all=melt(total_bm_all)
+
+ctotal_bm_all=dcast(mtotal_bm_all, species*habitat ~ soil.light)
+
+plas_total_bm=ctotal_bm_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_total_bm$C.gu = Fun.plas(x=plas_total_bm$cxg, y=plas_total_bm$cxu)
+plas_total_bm$S.gu = Fun.plas(x=plas_total_bm$sxg, y=plas_total_bm$sxu)
+plas_total_bm$G.cs = Fun.plas(x=plas_total_bm$cxg, y=plas_total_bm$sxg)
+plas_total_bm$U.cs = Fun.plas(x=plas_total_bm$cxu, y=plas_total_bm$sxu)
+
+# End total_bm
+
+# lmr
+
+lmr=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  lmr=master$lmr
+)
+
+hist(lmr$lmr)
+
+agg_lmr = aggregate(lmr ~ plot*species*habitat*soil*light,
+                    data=lmr,
+                    FUN=mean)
+
+lmr_all = aggregate(lmr~species*habitat*soil*light,
+                    data=agg_lmr,
+                    FUN=mean)
+
+lmr_all$soil.light = with(lmr_all, interaction(soil, light, sep="x"))
+
+str(lmr_all)
+
+mlmr_all=melt(lmr_all)
+
+clmr_all=dcast(mlmr_all, species*habitat ~ soil.light)
+
+plas_lmr=clmr_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_lmr$C.gu = Fun.plas(x=plas_lmr$cxg, y=plas_lmr$cxu)
+plas_lmr$S.gu = Fun.plas(x=plas_lmr$sxg, y=plas_lmr$sxu)
+plas_lmr$G.cs = Fun.plas(x=plas_lmr$cxg, y=plas_lmr$sxg)
+plas_lmr$U.cs = Fun.plas(x=plas_lmr$cxu, y=plas_lmr$sxu)
+
+# End lmr
+
+# rmr
+
+rmr=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  rmr=master$rmr
+)
+
+hist(rmr$rmr)
+
+agg_rmr = aggregate(rmr ~ plot*species*habitat*soil*light,
+                    data=rmr,
+                    FUN=mean)
+
+rmr_all = aggregate(rmr~species*habitat*soil*light,
+                    data=agg_rmr,
+                    FUN=mean)
+
+rmr_all$soil.light = with(rmr_all, interaction(soil, light, sep="x"))
+
+str(rmr_all)
+
+mrmr_all=melt(rmr_all)
+
+crmr_all=dcast(mrmr_all, species*habitat ~ soil.light)
+
+plas_rmr=crmr_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_rmr$C.gu = Fun.plas(x=plas_rmr$cxg, y=plas_rmr$cxu)
+plas_rmr$S.gu = Fun.plas(x=plas_rmr$sxg, y=plas_rmr$sxu)
+plas_rmr$G.cs = Fun.plas(x=plas_rmr$cxg, y=plas_rmr$sxg)
+plas_rmr$U.cs = Fun.plas(x=plas_rmr$cxu, y=plas_rmr$sxu)
+
+# End rmr
+
+# sum_leaf_area
+
+sum_leaf_area=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  sum_leaf_area=master$sum_leaf_area
+)
+
+hist(sum_leaf_area$sum_leaf_area)
+
+agg_sum_leaf_area = aggregate(sum_leaf_area ~ plot*species*habitat*soil*light,
+                              data=sum_leaf_area,
+                              FUN=mean)
+
+sum_leaf_area_all = aggregate(sum_leaf_area~species*habitat*soil*light,
+                              data=agg_sum_leaf_area,
+                              FUN=mean)
+
+sum_leaf_area_all$soil.light = with(sum_leaf_area_all, interaction(soil, light, sep="x"))
+
+str(sum_leaf_area_all)
+
+msum_leaf_area_all=melt(sum_leaf_area_all)
+
+csum_leaf_area_all=dcast(msum_leaf_area_all, species*habitat ~ soil.light)
+
+plas_sum_leaf_area=csum_leaf_area_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_sum_leaf_area$C.gu = Fun.plas(x=plas_sum_leaf_area$cxg, y=plas_sum_leaf_area$cxu)
+plas_sum_leaf_area$S.gu = Fun.plas(x=plas_sum_leaf_area$sxg, y=plas_sum_leaf_area$sxu)
+plas_sum_leaf_area$G.cs = Fun.plas(x=plas_sum_leaf_area$cxg, y=plas_sum_leaf_area$sxg)
+plas_sum_leaf_area$U.cs = Fun.plas(x=plas_sum_leaf_area$cxu, y=plas_sum_leaf_area$sxu)
+
+# End sum_leaf_area
+
+# mean_leaf_area
+
+mean_leaf_area=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  mean_leaf_area=master$mean_leaf_area
+)
+
+hist(mean_leaf_area$mean_leaf_area)
+
+agg_mean_leaf_area = aggregate(mean_leaf_area ~ plot*species*habitat*soil*light,
+                               data=mean_leaf_area,
+                               FUN=mean)
+
+mean_leaf_area_all = aggregate(mean_leaf_area~species*habitat*soil*light,
+                               data=agg_mean_leaf_area,
+                               FUN=mean)
+
+mean_leaf_area_all$soil.light = with(mean_leaf_area_all, interaction(soil, light, sep="x"))
+
+str(mean_leaf_area_all)
+
+mmean_leaf_area_all=melt(mean_leaf_area_all)
+
+cmean_leaf_area_all=dcast(mmean_leaf_area_all, species*habitat ~ soil.light)
+
+plas_mean_leaf_area=cmean_leaf_area_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_mean_leaf_area$C.gu = Fun.plas(x=plas_mean_leaf_area$cxg, y=plas_mean_leaf_area$cxu)
+plas_mean_leaf_area$S.gu = Fun.plas(x=plas_mean_leaf_area$sxg, y=plas_mean_leaf_area$sxu)
+plas_mean_leaf_area$G.cs = Fun.plas(x=plas_mean_leaf_area$cxg, y=plas_mean_leaf_area$sxg)
+plas_mean_leaf_area$U.cs = Fun.plas(x=plas_mean_leaf_area$cxu, y=plas_mean_leaf_area$sxu)
+
+# End mean_leaf_area
+
+# leaf_vol
+
+leaf_vol=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  leaf_vol=master$leaf_vol
+)
+
+hist(leaf_vol$leaf_vol)
+
+agg_leaf_vol = aggregate(leaf_vol ~ plot*species*habitat*soil*light,
+                         data=leaf_vol,
+                         FUN=mean)
+
+leaf_vol_all = aggregate(leaf_vol~species*habitat*soil*light,
+                         data=agg_leaf_vol,
+                         FUN=mean)
+
+leaf_vol_all$soil.light = with(leaf_vol_all, interaction(soil, light, sep="x"))
+
+str(leaf_vol_all)
+
+mleaf_vol_all=melt(leaf_vol_all)
+
+cleaf_vol_all=dcast(mleaf_vol_all, species*habitat ~ soil.light)
+
+plas_leaf_vol=cleaf_vol_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_leaf_vol$C.gu = Fun.plas(x=plas_leaf_vol$cxg, y=plas_leaf_vol$cxu)
+plas_leaf_vol$S.gu = Fun.plas(x=plas_leaf_vol$sxg, y=plas_leaf_vol$sxu)
+plas_leaf_vol$G.cs = Fun.plas(x=plas_leaf_vol$cxg, y=plas_leaf_vol$sxg)
+plas_leaf_vol$U.cs = Fun.plas(x=plas_leaf_vol$cxu, y=plas_leaf_vol$sxu)
+
+# End leaf_vol
+
+# lar
+
+lar=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  lar=master$lar
+)
+
+hist(lar$lar)
+
+agg_lar = aggregate(lar ~ plot*species*habitat*soil*light,
+                    data=lar,
+                    FUN=mean)
+
+lar_all = aggregate(lar~species*habitat*soil*light,
+                    data=agg_lar,
+                    FUN=mean)
+
+lar_all$soil.light = with(lar_all, interaction(soil, light, sep="x"))
+
+str(lar_all)
+
+mlar_all=melt(lar_all)
+
+clar_all=dcast(mlar_all, species*habitat ~ soil.light)
+
+plas_lar=clar_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_lar$C.gu = Fun.plas(x=plas_lar$cxg, y=plas_lar$cxu)
+plas_lar$S.gu = Fun.plas(x=plas_lar$sxg, y=plas_lar$sxu)
+plas_lar$G.cs = Fun.plas(x=plas_lar$cxg, y=plas_lar$sxg)
+plas_lar$U.cs = Fun.plas(x=plas_lar$cxu, y=plas_lar$sxu)
+
+# End lar
+
+# leaf_density
+
+leaf_density=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  leaf_density=master$leaf_density
+)
+
+hist(leaf_density$leaf_density)
+
+agg_leaf_density = aggregate(leaf_density ~ plot*species*habitat*soil*light,
+                             data=leaf_density,
+                             FUN=mean)
+
+leaf_density_all = aggregate(leaf_density~species*habitat*soil*light,
+                             data=agg_leaf_density,
+                             FUN=mean)
+
+leaf_density_all$soil.light = with(leaf_density_all, interaction(soil, light, sep="x"))
+
+str(leaf_density_all)
+
+mleaf_density_all=melt(leaf_density_all)
+
+cleaf_density_all=dcast(mleaf_density_all, species*habitat ~ soil.light)
+
+plas_leaf_density=cleaf_density_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_leaf_density$C.gu = Fun.plas(x=plas_leaf_density$cxg, y=plas_leaf_density$cxu)
+plas_leaf_density$S.gu = Fun.plas(x=plas_leaf_density$sxg, y=plas_leaf_density$sxu)
+plas_leaf_density$G.cs = Fun.plas(x=plas_leaf_density$cxg, y=plas_leaf_density$sxg)
+plas_leaf_density$U.cs = Fun.plas(x=plas_leaf_density$cxu, y=plas_leaf_density$sxu)
+
+# End leaf_density
+
+# nleaf_gr
+
+nleaf_gr=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  nleaf_gr=sub_master$nleaf_gr
+)
+
+hist(nleaf_gr$nleaf_gr)
+
+agg_nleaf_gr = aggregate(nleaf_gr ~ plot*species*habitat*soil*light,
+                         data=nleaf_gr,
+                         FUN=mean)
+
+nleaf_gr_all = aggregate(nleaf_gr~species*habitat*soil*light,
+                         data=agg_nleaf_gr,
+                         FUN=mean)
+
+nleaf_gr_all$soil.light = with(nleaf_gr_all, interaction(soil, light, sep="x"))
+
+str(nleaf_gr_all)
+
+mnleaf_gr_all=melt(nleaf_gr_all)
+
+cnleaf_gr_all=dcast(mnleaf_gr_all, species*habitat ~ soil.light)
+
+plas_nleaf_gr=cnleaf_gr_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_nleaf_gr$C.gu = Fun.plas(x=plas_nleaf_gr$cxg, y=plas_nleaf_gr$cxu)
+plas_nleaf_gr$S.gu = Fun.plas(x=plas_nleaf_gr$sxg, y=plas_nleaf_gr$sxu)
+plas_nleaf_gr$G.cs = Fun.plas(x=plas_nleaf_gr$cxg, y=plas_nleaf_gr$sxg)
+plas_nleaf_gr$U.cs = Fun.plas(x=plas_nleaf_gr$cxu, y=plas_nleaf_gr$sxu)
+
+# End nleaf_gr
+
+# depth
+
+depth=data.frame(
+  plot=master$plot,
+  species=master$species,
+  habitat=master$habitat,
+  soil=master$soil,
+  light=master$light,
+  depth=master$depth
+)
+
+hist(depth$depth)
+
+agg_depth = aggregate(depth ~ plot*species*habitat*soil*light,
+                      data=depth,
+                      FUN=mean)
+
+depth_all = aggregate(depth~species*habitat*soil*light,
+                      data=agg_depth,
+                      FUN=mean)
+
+depth_all$soil.light = with(depth_all, interaction(soil, light, sep="x"))
+
+str(depth_all)
+
+mdepth_all=melt(depth_all)
+
+cdepth_all=dcast(mdepth_all, species*habitat ~ soil.light)
+
+plas_depth=cdepth_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_depth$C.gu = Fun.plas(x=plas_depth$cxg, y=plas_depth$cxu)
+plas_depth$S.gu = Fun.plas(x=plas_depth$sxg, y=plas_depth$sxu)
+plas_depth$G.cs = Fun.plas(x=plas_depth$cxg, y=plas_depth$sxg)
+plas_depth$U.cs = Fun.plas(x=plas_depth$cxu, y=plas_depth$sxu)
+
+# End depth
+
+# per_above
+
+per_above=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  per_above=sub_master$per_above
+)
+
+hist(per_above$per_above)
+
+agg_per_above = aggregate(per_above ~ plot*species*habitat*soil*light,
+                      data=per_above,
+                      FUN=mean)
+
+per_above_all = aggregate(per_above~species*habitat*soil*light,
+                      data=agg_per_above,
+                      FUN=mean)
+
+per_above_all$soil.light = with(per_above_all, interaction(soil, light, sep="x"))
+
+str(per_above_all)
+
+mper_above_all=melt(per_above_all)
+
+cper_above_all=dcast(mper_above_all, species*habitat ~ soil.light)
+
+plas_per_above=cper_above_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_per_above$C.gu = Fun.plas(x=plas_per_above$cxg, y=plas_per_above$cxu)
+plas_per_above$S.gu = Fun.plas(x=plas_per_above$sxg, y=plas_per_above$sxu)
+plas_per_above$G.cs = Fun.plas(x=plas_per_above$cxg, y=plas_per_above$sxg)
+plas_per_above$U.cs = Fun.plas(x=plas_per_above$cxu, y=plas_per_above$sxu)
+
+# End per_above
+
+# per_stem_weight
+
+per_stem_weight=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  per_stem_weight=sub_master$per_stem_weight
+)
+
+hist(per_stem_weight$per_stem_weight)
+
+agg_per_stem_weight = aggregate(per_stem_weight ~ plot*species*habitat*soil*light,
+                          data=per_stem_weight,
+                          FUN=mean)
+
+per_stem_weight_all = aggregate(per_stem_weight~species*habitat*soil*light,
+                          data=agg_per_stem_weight,
+                          FUN=mean)
+
+per_stem_weight_all$soil.light = with(per_stem_weight_all, interaction(soil, light, sep="x"))
+
+str(per_stem_weight_all)
+
+mper_stem_weight_all=melt(per_stem_weight_all)
+
+cper_stem_weight_all=dcast(mper_stem_weight_all, species*habitat ~ soil.light)
+
+plas_per_stem_weight=cper_stem_weight_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_per_stem_weight$C.gu = Fun.plas(x=plas_per_stem_weight$cxg, y=plas_per_stem_weight$cxu)
+plas_per_stem_weight$S.gu = Fun.plas(x=plas_per_stem_weight$sxg, y=plas_per_stem_weight$sxu)
+plas_per_stem_weight$G.cs = Fun.plas(x=plas_per_stem_weight$cxg, y=plas_per_stem_weight$sxg)
+plas_per_stem_weight$U.cs = Fun.plas(x=plas_per_stem_weight$cxu, y=plas_per_stem_weight$sxu)
+
+# End per_stem_weight
+
+# total_bm_agr
+
+total_bm_agr=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  total_bm_agr=sub_master$total_bm_agr
+)
+
+hist(total_bm_agr$total_bm_agr)
+
+agg_total_bm_agr = aggregate(total_bm_agr ~ plot*species*habitat*soil*light,
+                          data=total_bm_agr,
+                          FUN=mean)
+
+total_bm_agr_all = aggregate(total_bm_agr~species*habitat*soil*light,
+                          data=agg_total_bm_agr,
+                          FUN=mean)
+
+total_bm_agr_all$soil.light = with(total_bm_agr_all, interaction(soil, light, sep="x"))
+
+str(total_bm_agr_all)
+
+mtotal_bm_agr_all=melt(total_bm_agr_all)
+
+ctotal_bm_agr_all=dcast(mtotal_bm_agr_all, species*habitat ~ soil.light)
+
+plas_total_bm_agr=ctotal_bm_agr_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_total_bm_agr$C.gu = Fun.plas(x=plas_total_bm_agr$cxg, y=plas_total_bm_agr$cxu)
+plas_total_bm_agr$S.gu = Fun.plas(x=plas_total_bm_agr$sxg, y=plas_total_bm_agr$sxu)
+plas_total_bm_agr$G.cs = Fun.plas(x=plas_total_bm_agr$cxg, y=plas_total_bm_agr$sxg)
+plas_total_bm_agr$U.cs = Fun.plas(x=plas_total_bm_agr$cxu, y=plas_total_bm_agr$sxu)
+
+# End total_bm_agr
+
+# height_rgr
+
+height_rgr=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  height_rgr=sub_master$height_rgr
+)
+
+hist(height_rgr$height_rgr)
+
+agg_height_rgr = aggregate(height_rgr ~ plot*species*habitat*soil*light,
+                          data=height_rgr,
+                          FUN=mean)
+
+height_rgr_all = aggregate(height_rgr~species*habitat*soil*light,
+                          data=agg_height_rgr,
+                          FUN=mean)
+
+height_rgr_all$soil.light = with(height_rgr_all, interaction(soil, light, sep="x"))
+
+str(height_rgr_all)
+
+mheight_rgr_all=melt(height_rgr_all)
+
+cheight_rgr_all=dcast(mheight_rgr_all, species*habitat ~ soil.light)
+
+plas_height_rgr=cheight_rgr_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_height_rgr$C.gu = Fun.plas(x=plas_height_rgr$cxg, y=plas_height_rgr$cxu)
+plas_height_rgr$S.gu = Fun.plas(x=plas_height_rgr$sxg, y=plas_height_rgr$sxu)
+plas_height_rgr$G.cs = Fun.plas(x=plas_height_rgr$cxg, y=plas_height_rgr$sxg)
+plas_height_rgr$U.cs = Fun.plas(x=plas_height_rgr$cxu, y=plas_height_rgr$sxu)
+
+# End height_rgr
+
+# diameter_rgr
+
+diameter_rgr=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  diameter_rgr=sub_master$diameter_rgr
+)
+
+hist(diameter_rgr$diameter_rgr)
+
+agg_diameter_rgr = aggregate(diameter_rgr ~ plot*species*habitat*soil*light,
+                          data=diameter_rgr,
+                          FUN=mean)
+
+diameter_rgr_all = aggregate(diameter_rgr~species*habitat*soil*light,
+                          data=agg_diameter_rgr,
+                          FUN=mean)
+
+diameter_rgr_all$soil.light = with(diameter_rgr_all, interaction(soil, light, sep="x"))
+
+str(diameter_rgr_all)
+
+mdiameter_rgr_all=melt(diameter_rgr_all)
+
+cdiameter_rgr_all=dcast(mdiameter_rgr_all, species*habitat ~ soil.light)
+
+plas_diameter_rgr=cdiameter_rgr_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_diameter_rgr$C.gu = Fun.plas(x=plas_diameter_rgr$cxg, y=plas_diameter_rgr$cxu)
+plas_diameter_rgr$S.gu = Fun.plas(x=plas_diameter_rgr$sxg, y=plas_diameter_rgr$sxu)
+plas_diameter_rgr$G.cs = Fun.plas(x=plas_diameter_rgr$cxg, y=plas_diameter_rgr$sxg)
+plas_diameter_rgr$U.cs = Fun.plas(x=plas_diameter_rgr$cxu, y=plas_diameter_rgr$sxu)
+
+# End diameter_rgr
+
+# nleaf_rgr
+
+nleaf_rgr=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  nleaf_rgr=sub_master$nleaf_rgr
+)
+
+hist(nleaf_rgr$nleaf_rgr)
+
+agg_nleaf_rgr = aggregate(nleaf_rgr ~ plot*species*habitat*soil*light,
+                          data=nleaf_rgr,
+                          FUN=mean)
+
+nleaf_rgr_all = aggregate(nleaf_rgr~species*habitat*soil*light,
+                          data=agg_nleaf_rgr,
+                          FUN=mean)
+
+nleaf_rgr_all$soil.light = with(nleaf_rgr_all, interaction(soil, light, sep="x"))
+
+str(nleaf_rgr_all)
+
+mnleaf_rgr_all=melt(nleaf_rgr_all)
+
+cnleaf_rgr_all=dcast(mnleaf_rgr_all, species*habitat ~ soil.light)
+
+plas_nleaf_rgr=cnleaf_rgr_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_nleaf_rgr$C.gu = Fun.plas(x=plas_nleaf_rgr$cxg, y=plas_nleaf_rgr$cxu)
+plas_nleaf_rgr$S.gu = Fun.plas(x=plas_nleaf_rgr$sxg, y=plas_nleaf_rgr$sxu)
+plas_nleaf_rgr$G.cs = Fun.plas(x=plas_nleaf_rgr$cxg, y=plas_nleaf_rgr$sxg)
+plas_nleaf_rgr$U.cs = Fun.plas(x=plas_nleaf_rgr$cxu, y=plas_nleaf_rgr$sxu)
+
+# End nleaf_rgr
+
+# leaf_area_agr
+
+leaf_area_agr=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  leaf_area_agr=sub_master$leaf_area_agr
+)
+
+hist(leaf_area_agr$leaf_area_agr)
+
+agg_leaf_area_agr = aggregate(leaf_area_agr ~ plot*species*habitat*soil*light,
+                          data=leaf_area_agr,
+                          FUN=mean)
+
+leaf_area_agr_all = aggregate(leaf_area_agr~species*habitat*soil*light,
+                          data=agg_leaf_area_agr,
+                          FUN=mean)
+
+leaf_area_agr_all$soil.light = with(leaf_area_agr_all, interaction(soil, light, sep="x"))
+
+str(leaf_area_agr_all)
+
+mleaf_area_agr_all=melt(leaf_area_agr_all)
+
+cleaf_area_agr_all=dcast(mleaf_area_agr_all, species*habitat ~ soil.light)
+
+plas_leaf_area_agr=cleaf_area_agr_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_leaf_area_agr$C.gu = Fun.plas(x=plas_leaf_area_agr$cxg, y=plas_leaf_area_agr$cxu)
+plas_leaf_area_agr$S.gu = Fun.plas(x=plas_leaf_area_agr$sxg, y=plas_leaf_area_agr$sxu)
+plas_leaf_area_agr$G.cs = Fun.plas(x=plas_leaf_area_agr$cxg, y=plas_leaf_area_agr$sxg)
+plas_leaf_area_agr$U.cs = Fun.plas(x=plas_leaf_area_agr$cxu, y=plas_leaf_area_agr$sxu)
+
+# End leaf_area_agr
+
+# frl
+
+frl=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  frl=sub_master$frl
+)
+
+hist(frl$frl)
+
+agg_frl = aggregate(frl ~ plot*species*habitat*soil*light,
+                    data=frl,
+                    FUN=mean)
+
+frl_all = aggregate(frl~species*habitat*soil*light,
+                    data=agg_frl,
+                    FUN=mean)
+
+frl_all$soil.light = with(frl_all, interaction(soil, light, sep="x"))
+
+str(frl_all)
+
+mfrl_all=melt(frl_all)
+
+cfrl_all=dcast(mfrl_all, species*habitat ~ soil.light)
+
+plas_frl=cfrl_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_frl$C.gu = Fun.plas(x=plas_frl$cxg, y=plas_frl$cxu)
+plas_frl$S.gu = Fun.plas(x=plas_frl$sxg, y=plas_frl$sxu)
+plas_frl$G.cs = Fun.plas(x=plas_frl$cxg, y=plas_frl$sxg)
+plas_frl$U.cs = Fun.plas(x=plas_frl$cxu, y=plas_frl$sxu)
+
+# End frl
+
+# FRMR
+
+FRMR=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  FRMR=sub_master$FRMR
+)
+
+hist(FRMR$FRMR)
+
+agg_FRMR = aggregate(FRMR ~ plot*species*habitat*soil*light,
+                    data=FRMR,
+                    FUN=mean)
+
+FRMR_all = aggregate(FRMR~species*habitat*soil*light,
+                    data=agg_FRMR,
+                    FUN=mean)
+
+FRMR_all$soil.light = with(FRMR_all, interaction(soil, light, sep="x"))
+
+str(FRMR_all)
+
+mFRMR_all=melt(FRMR_all)
+
+cFRMR_all=dcast(mFRMR_all, species*habitat ~ soil.light)
+
+plas_FRMR=cFRMR_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_FRMR$C.gu = Fun.plas(x=plas_FRMR$cxg, y=plas_FRMR$cxu)
+plas_FRMR$S.gu = Fun.plas(x=plas_FRMR$sxg, y=plas_FRMR$sxu)
+plas_FRMR$G.cs = Fun.plas(x=plas_FRMR$cxg, y=plas_FRMR$sxg)
+plas_FRMR$U.cs = Fun.plas(x=plas_FRMR$cxu, y=plas_FRMR$sxu)
+
+# End FRMR
+
+# srl
+
+srl=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  srl=sub_master$srl
+)
+
+hist(srl$srl)
+
+agg_srl = aggregate(srl ~ plot*species*habitat*soil*light,
+                    data=srl,
+                    FUN=mean)
+
+srl_all = aggregate(srl~species*habitat*soil*light,
+                    data=agg_srl,
+                    FUN=mean)
+
+srl_all$soil.light = with(srl_all, interaction(soil, light, sep="x"))
+
+str(srl_all)
+
+msrl_all=melt(srl_all)
+
+csrl_all=dcast(msrl_all, species*habitat ~ soil.light)
+
+plas_srl=csrl_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_srl$C.gu = Fun.plas(x=plas_srl$cxg, y=plas_srl$cxu)
+plas_srl$S.gu = Fun.plas(x=plas_srl$sxg, y=plas_srl$sxu)
+plas_srl$G.cs = Fun.plas(x=plas_srl$cxg, y=plas_srl$sxg)
+plas_srl$U.cs = Fun.plas(x=plas_srl$cxu, y=plas_srl$sxu)
+
+# End srl
+
+# perCarbon
+
+perCarbon=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  perCarbon=sub_master$perCarbon
+)
+
+hist(perCarbon$perCarbon)
+
+agg_perCarbon = aggregate(perCarbon ~ plot*species*habitat*soil*light,
+                    data=perCarbon,
+                    FUN=mean)
+
+perCarbon_all = aggregate(perCarbon~species*habitat*soil*light,
+                    data=agg_perCarbon,
+                    FUN=mean)
+
+perCarbon_all$soil.light = with(perCarbon_all, interaction(soil, light, sep="x"))
+
+str(perCarbon_all)
+
+mperCarbon_all=melt(perCarbon_all)
+
+cperCarbon_all=dcast(mperCarbon_all, species*habitat ~ soil.light)
+
+plas_perCarbon=cperCarbon_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_perCarbon$C.gu = Fun.plas(x=plas_perCarbon$cxg, y=plas_perCarbon$cxu)
+plas_perCarbon$S.gu = Fun.plas(x=plas_perCarbon$sxg, y=plas_perCarbon$sxu)
+plas_perCarbon$G.cs = Fun.plas(x=plas_perCarbon$cxg, y=plas_perCarbon$sxg)
+plas_perCarbon$U.cs = Fun.plas(x=plas_perCarbon$cxu, y=plas_perCarbon$sxu)
+
+# End perCarbon
+
+# perNitrogen
+
+perNitrogen=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  perNitrogen=sub_master$perNitrogen
+)
+
+hist(perNitrogen$perNitrogen)
+
+agg_perNitrogen = aggregate(perNitrogen ~ plot*species*habitat*soil*light,
+                    data=perNitrogen,
+                    FUN=mean)
+
+perNitrogen_all = aggregate(perNitrogen~species*habitat*soil*light,
+                    data=agg_perNitrogen,
+                    FUN=mean)
+
+perNitrogen_all$soil.light = with(perNitrogen_all, interaction(soil, light, sep="x"))
+
+str(perNitrogen_all)
+
+mperNitrogen_all=melt(perNitrogen_all)
+
+cperNitrogen_all=dcast(mperNitrogen_all, species*habitat ~ soil.light)
+
+plas_perNitrogen=cperNitrogen_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_perNitrogen$C.gu = Fun.plas(x=plas_perNitrogen$cxg, y=plas_perNitrogen$cxu)
+plas_perNitrogen$S.gu = Fun.plas(x=plas_perNitrogen$sxg, y=plas_perNitrogen$sxu)
+plas_perNitrogen$G.cs = Fun.plas(x=plas_perNitrogen$cxg, y=plas_perNitrogen$sxg)
+plas_perNitrogen$U.cs = Fun.plas(x=plas_perNitrogen$cxu, y=plas_perNitrogen$sxu)
+
+# End perNitrogen
+
+# CNR
+
+CNR=data.frame(
+  plot=sub_master$plot,
+  species=sub_master$species,
+  habitat=sub_master$habitat,
+  soil=sub_master$soil,
+  light=sub_master$light,
+  CNR=sub_master$CNR
+)
+
+hist(CNR$CNR)
+
+agg_CNR = aggregate(CNR ~ plot*species*habitat*soil*light,
+                    data=CNR,
+                    FUN=mean)
+
+CNR_all = aggregate(CNR~species*habitat*soil*light,
+                    data=agg_CNR,
+                    FUN=mean)
+
+CNR_all$soil.light = with(CNR_all, interaction(soil, light, sep="x"))
+
+str(CNR_all)
+
+mCNR_all=melt(CNR_all)
+
+cCNR_all=dcast(mCNR_all, species*habitat ~ soil.light)
+
+plas_CNR=cCNR_all
+
+# Conditions held constant capitalised.
+# Letters after period denote treatments being compared.
+
+plas_CNR$C.gu = Fun.plas(x=plas_CNR$cxg, y=plas_CNR$cxu)
+plas_CNR$S.gu = Fun.plas(x=plas_CNR$sxg, y=plas_CNR$sxu)
+plas_CNR$G.cs = Fun.plas(x=plas_CNR$cxg, y=plas_CNR$sxg)
+plas_CNR$U.cs = Fun.plas(x=plas_CNR$cxu, y=plas_CNR$sxu)
+
+# End CNR
+
+# # srpa
+# 
+# srpa=data.frame(
+#   plot=sub_master$plot,
+#   species=sub_master$species,
+#   habitat=sub_master$habitat,
+#   soil=sub_master$soil,
+#   light=sub_master$light,
+#   srpa=sub_master$srpa
+# )
+# 
+# hist(srpa$srpa)
+# 
+# agg_srpa = aggregate(srpa ~ plot*species*habitat*soil*light,
+#                      data=srpa,
+#                      FUN=mean)
+# 
+# srpa_all = aggregate(srpa~species*habitat*soil*light,
+#                      data=agg_srpa,
+#                      FUN=mean)
+# 
+# srpa_all$soil.light = with(srpa_all, interaction(soil, light, sep="x"))
+# 
+# str(srpa_all)
+# 
+# msrpa_all=melt(srpa_all)
+# 
+# csrpa_all=dcast(msrpa_all, species*habitat ~ soil.light)
+# 
+# plas_srpa=csrpa_all
+# 
+# # Conditions held constant capitalised.
+# # Letters after period denote treatments being compared.
+# 
+# plas_srpa$C.gu = Fun.plas(x=plas_srpa$cxg, y=plas_srpa$cxu)
+# plas_srpa$S.gu = Fun.plas(x=plas_srpa$sxg, y=plas_srpa$sxu)
+# plas_srpa$G.cs = Fun.plas(x=plas_srpa$cxg, y=plas_srpa$sxg)
+# plas_srpa$U.cs = Fun.plas(x=plas_srpa$cxu, y=plas_srpa$sxu)
+# 
+# # End srpa
+# 
+# # srsa
+# 
+# srsa=data.frame(
+#   plot=sub_master$plot,
+#   species=sub_master$species,
+#   habitat=sub_master$habitat,
+#   soil=sub_master$soil,
+#   light=sub_master$light,
+#   srsa=sub_master$srsa
+# )
+# 
+# hist(srsa$srsa)
+# 
+# agg_srsa = aggregate(srsa ~ plot*species*habitat*soil*light,
+#                      data=srsa,
+#                      FUN=mean)
+# 
+# srsa_all = aggregate(srsa~species*habitat*soil*light,
+#                      data=agg_srsa,
+#                      FUN=mean)
+# 
+# srsa_all$soil.light = with(srsa_all, interaction(soil, light, sep="x"))
+# 
+# str(srsa_all)
+# 
+# msrsa_all=melt(srsa_all)
+# 
+# csrsa_all=dcast(msrsa_all, species*habitat ~ soil.light)
+# 
+# plas_srsa=csrsa_all
+# 
+# # Conditions held constant capitalised.
+# # Letters after period denote treatments being compared.
+# 
+# plas_srsa$C.gu = Fun.plas(x=plas_srsa$cxg, y=plas_srsa$cxu)
+# plas_srsa$S.gu = Fun.plas(x=plas_srsa$sxg, y=plas_srsa$sxu)
+# plas_srsa$G.cs = Fun.plas(x=plas_srsa$cxg, y=plas_srsa$sxg)
+# plas_srsa$U.cs = Fun.plas(x=plas_srsa$cxu, y=plas_srsa$sxu)
+# 
+# # End srsa
+# 
+# # srd
+# 
+# srd=data.frame(
+#   plot=sub_master$plot,
+#   species=sub_master$species,
+#   habitat=sub_master$habitat,
+#   soil=sub_master$soil,
+#   light=sub_master$light,
+#   srd=sub_master$srd
+# )
+# 
+# hist(srd$srd)
+# 
+# agg_srd = aggregate(srd ~ plot*species*habitat*soil*light,
+#                     data=srd,
+#                     FUN=mean)
+# 
+# srd_all = aggregate(srd~species*habitat*soil*light,
+#                     data=agg_srd,
+#                     FUN=mean)
+# 
+# srd_all$soil.light = with(srd_all, interaction(soil, light, sep="x"))
+# 
+# str(srd_all)
+# 
+# msrd_all=melt(srd_all)
+# 
+# csrd_all=dcast(msrd_all, species*habitat ~ soil.light)
+# 
+# plas_srd=csrd_all
+# 
+# # Conditions held constant capitalised.
+# # Letters after period denote treatments being compared.
+# 
+# plas_srd$C.gu = Fun.plas(x=plas_srd$cxg, y=plas_srd$cxu)
+# plas_srd$S.gu = Fun.plas(x=plas_srd$sxg, y=plas_srd$sxu)
+# plas_srd$G.cs = Fun.plas(x=plas_srd$cxg, y=plas_srd$sxg)
+# plas_srd$U.cs = Fun.plas(x=plas_srd$cxu, y=plas_srd$sxu)
+# 
+# # End srd
+# 
+# # srv
+# 
+# srv=data.frame(
+#   plot=sub_master$plot,
+#   species=sub_master$species,
+#   habitat=sub_master$habitat,
+#   soil=sub_master$soil,
+#   light=sub_master$light,
+#   srv=sub_master$srv
+# )
+# 
+# hist(srv$srv)
+# 
+# agg_srv = aggregate(srv ~ plot*species*habitat*soil*light,
+#                     data=srv,
+#                     FUN=mean)
+# 
+# srv_all = aggregate(srv~species*habitat*soil*light,
+#                     data=agg_srv,
+#                     FUN=mean)
+# 
+# srv_all$soil.light = with(srv_all, interaction(soil, light, sep="x"))
+# 
+# str(srv_all)
+# 
+# msrv_all=melt(srv_all)
+# 
+# csrv_all=dcast(msrv_all, species*habitat ~ soil.light)
+# 
+# plas_srv=csrv_all
+# 
+# # Conditions held constant capitalised.
+# # Letters after period denote treatments being compared.
+# 
+# plas_srv$C.gu = Fun.plas(x=plas_srv$cxg, y=plas_srv$cxu)
+# plas_srv$S.gu = Fun.plas(x=plas_srv$sxg, y=plas_srv$sxu)
+# plas_srv$G.cs = Fun.plas(x=plas_srv$cxg, y=plas_srv$sxg)
+# plas_srv$U.cs = Fun.plas(x=plas_srv$cxu, y=plas_srv$sxu)
+# 
+# # End srv
+
+# sab=lm(mean_sla_PIs~as.factor(Soil_Assoc))
+# anova(sab)
+# summary(sab)
+# plot(mean_sla_PIs,stem_density_PIs)
+# plot(abs),abs(stem_density_PIs))
+# cor.test(abs),abs(stem_density_PIs))
+
+```
+
+
+```{r stats, include=F, warning=F, echo=F, message=F}
+min(sub_master$harvested-sub_master$seed_sow, na.rm = T)/30
+max(sub_master$harvested-sub_master$seed_sow, na.rm = T)/30
+```
+
+
+```{r plas_light, warning=F, echo=F, message=F, include=F}
+# Plasticity vs Plasticity due to light
+
+# Only select relevant colums in dataframe
+##Stem density
+
+mplas_SDen_light=as.data.frame(plas_stem_density)
+
+mplas_SDen_light=melt(mplas_SDen_light, 
+                id.vars=c("species", "habitat"),
+                measure.vars= c("C.gu", "S.gu")
+                )
+mplas_SDen_light$abs=abs(mplas_SDen_light$value)
+colnames(mplas_SDen_light)[colnames(mplas_SDen_light) == "value"] = "plas"
+colnames(mplas_SDen_light)[colnames(mplas_SDen_light) == "variable"] = "soil"
+
+mplas_SDen_light$trait = "SDen"
+
+## Root density
+
+mplas_RDen_light=as.data.frame(plas_root_density)
+
+mplas_RDen_light=melt(mplas_RDen_light, 
+                id.vars=c("species", "habitat"),
+                measure.vars= c("C.gu", "S.gu")
+                )
+mplas_RDen_light$abs=abs(mplas_RDen_light$value)
+colnames(mplas_RDen_light)[colnames(mplas_RDen_light) == "value"] = "plas"
+colnames(mplas_RDen_light)[colnames(mplas_RDen_light) == "variable"] = "soil"
+
+mplas_RDen_light$trait = "RDen"
+
+## Lamina density
+mplas_LDen_light=as.data.frame(plas_leaf_density)
+
+mplas_LDen_light=melt(mplas_LDen_light,
+                          id.vars=c("species", "habitat"),
+                          measure.vars= c("C.gu", "S.gu")
+                          )
+mplas_LDen_light$abs=abs(mplas_LDen_light$value)
+colnames(mplas_LDen_light)[colnames(mplas_LDen_light) == "value"] = "plas"
+colnames(mplas_LDen_light)[colnames(mplas_LDen_light) == "variable"] = "soil"
+
+mplas_LDen_light$trait = "LDen"
+
+## SLA
+mplas_SLA_light=as.data.frame(plas_mean_sla)
+
+mplas_SLA_light=melt(mplas_SLA_light, 
+               id.vars=c("species", "habitat"),
+               measure.vars= c("C.gu", "S.gu")
+               )
+mplas_SLA_light$abs=abs(mplas_SLA_light$value)
+colnames(mplas_SLA_light)[colnames(mplas_SLA_light) == "value"] = "plas"
+colnames(mplas_SLA_light)[colnames(mplas_SLA_light) == "variable"] = "soil"
+
+mplas_SLA_light$trait = "SLA"
+
+## Lamina thickness
+mplas_LamThick_light=as.data.frame(plas_avg_thickness_mm)
+
+mplas_LamThick_light=melt(mplas_LamThick_light,
+                          id.vars=c("species", "habitat"),
+                          measure.vars= c("C.gu", "S.gu")
+                          )
+mplas_LamThick_light$abs=abs(mplas_LamThick_light$value)
+colnames(mplas_LamThick_light)[colnames(mplas_LamThick_light) == "value"] = "plas"
+colnames(mplas_LamThick_light)[colnames(mplas_LamThick_light) == "variable"] = "soil"
+
+mplas_LamThick_light$trait = "LamThick"
+
+## Lamina Area
+mplas_LamArea_light=as.data.frame(plas_mean_leaf_area)
+
+mplas_LamArea_light=melt(mplas_LamArea_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu")
+                   )
+mplas_LamArea_light$abs=abs(mplas_LamArea_light$value)
+colnames(mplas_LamArea_light)[colnames(mplas_LamArea_light) == "value"] = "plas"
+colnames(mplas_LamArea_light)[colnames(mplas_LamArea_light) == "variable"] = "soil"
+
+mplas_LamArea_light$trait = "LamArea"
+
+## LMR
+mplas_LMR_light=as.data.frame(plas_lmr)
+
+mplas_LMR_light=melt(mplas_LMR_light,
+               id.vars=c("species", "habitat"),
+               measure.vars= c("C.gu", "S.gu")
+               )
+mplas_LMR_light$abs=abs(mplas_LMR_light$value)
+colnames(mplas_LMR_light)[colnames(mplas_LMR_light) == "value"] = "plas"
+colnames(mplas_LMR_light)[colnames(mplas_LMR_light) == "variable"] = "soil"
+
+mplas_LMR_light$trait = "LMR"
+
+## RMR
+mplas_RMR_light=as.data.frame(plas_rmr)
+
+mplas_RMR_light=melt(mplas_RMR_light,
+               id.vars=c("species", "habitat"),
+               measure.vars= c("C.gu", "S.gu")
+               )
+mplas_RMR_light$abs=abs(mplas_RMR_light$value)
+colnames(mplas_RMR_light)[colnames(mplas_RMR_light) == "value"] = "plas"
+colnames(mplas_RMR_light)[colnames(mplas_RMR_light) == "variable"] = "soil"
+
+mplas_RMR_light$trait = "RMR"
+
+## LAR
+mplas_LAR_light=as.data.frame(plas_lar)
+
+mplas_LAR_light=melt(mplas_LAR_light,
+               id.vars=c("species", "habitat"),
+               measure.vars= c("C.gu", "S.gu")
+               )
+mplas_LAR_light$abs=abs(mplas_LAR_light$value)
+colnames(mplas_LAR_light)[colnames(mplas_LAR_light) == "value"] = "plas"
+colnames(mplas_LAR_light)[colnames(mplas_LAR_light) == "variable"] = "soil"
+
+mplas_LAR_light$trait = "LAR"
+
+## Root depth
+mplas_RDepth_light=as.data.frame(plas_depth)
+
+mplas_RDepth_light=melt(mplas_RDepth_light,
+                 id.vars=c("species", "habitat"),
+                 measure.vars= c("C.gu", "S.gu")
+                 )
+mplas_RDepth_light$abs=abs(mplas_RDepth_light$value)
+colnames(mplas_RDepth_light)[colnames(mplas_RDepth_light) == "value"] = "plas"
+colnames(mplas_RDepth_light)[colnames(mplas_RDepth_light) == "variable"] = "soil"
+
+mplas_RDepth_light$trait = "RDepth"
+
+## Percent aboveground biomass
+mplas_PerAbov_light=as.data.frame(plas_per_above)
+
+mplas_PerAbov_light=melt(mplas_PerAbov_light,
+                     id.vars=c("species", "habitat"),
+                     measure.vars= c("C.gu", "S.gu")
+                     )
+mplas_PerAbov_light$abs=abs(mplas_PerAbov_light$value)
+colnames(mplas_PerAbov_light)[colnames(mplas_PerAbov_light) == "value"] = "plas"
+colnames(mplas_PerAbov_light)[colnames(mplas_PerAbov_light) == "variable"] = "soil"
+
+mplas_PerAbov_light$trait = "PerAbov"
+
+## Percent stem biomass
+mplas_PerStem_light=as.data.frame(plas_per_stem_weight)
+
+mplas_PerStem_light=melt(mplas_PerStem_light,
+                           id.vars=c("species", "habitat"),
+                           measure.vars= c("C.gu", "S.gu")
+                   )
+mplas_PerStem_light$abs=abs(mplas_PerStem_light$value)
+colnames(mplas_PerStem_light)[colnames(mplas_PerStem_light) == "value"] = "plas"
+colnames(mplas_PerStem_light)[colnames(mplas_PerStem_light) == "variable"] = "soil"
+
+mplas_PerStem_light$trait = "PerStem"
+
+## absgrowth rate of lamina area 
+mplas_LamArea_agr_light=as.data.frame(plas_leaf_area_agr)
+
+mplas_LamArea_agr_light=melt(mplas_LamArea_agr_light,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("C.gu", "S.gu")
+                         )
+mplas_LamArea_agr_light$abs=abs(mplas_LamArea_agr_light$value)
+colnames(mplas_LamArea_agr_light)[colnames(mplas_LamArea_agr_light) == "value"] = "plas"
+colnames(mplas_LamArea_agr_light)[colnames(mplas_LamArea_agr_light) == "variable"] = "soil"
+
+mplas_LamArea_agr_light$trait = "LamArea_agr"
+
+## frl
+
+mplas_frl_light=as.data.frame(plas_frl)
+
+mplas_frl_light=melt(mplas_frl_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu"))
+mplas_frl_light$abs=abs(mplas_frl_light$value)
+colnames(mplas_frl_light)[colnames(mplas_frl_light) == "value"] = "plas"
+colnames(mplas_frl_light)[colnames(mplas_frl_light) == "variable"] = "soil"
+
+mplas_frl_light$trait = "frl"
+
+## FRMR
+
+mplas_FRMR_light=as.data.frame(plas_FRMR)
+
+mplas_FRMR_light=melt(mplas_FRMR_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu"))
+mplas_FRMR_light$abs=abs(mplas_FRMR_light$value)
+colnames(mplas_FRMR_light)[colnames(mplas_FRMR_light) == "value"] = "plas"
+colnames(mplas_FRMR_light)[colnames(mplas_FRMR_light) == "variable"] = "soil"
+
+mplas_FRMR_light$trait = "FRMR"
+
+## srl
+mplas_srl_light=as.data.frame(plas_srl)
+
+mplas_srl_light=melt(mplas_srl_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu"))
+mplas_srl_light$abs=abs(mplas_srl_light$value)
+colnames(mplas_srl_light)[colnames(mplas_srl_light) == "value"] = "plas"
+colnames(mplas_srl_light)[colnames(mplas_srl_light) == "variable"] = "soil"
+
+mplas_srl_light$trait = "srl"
+
+## perCarbon
+mplas_perCarbon_light=as.data.frame(plas_perCarbon)
+
+mplas_perCarbon_light=melt(mplas_perCarbon_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu"))
+mplas_perCarbon_light$abs=abs(mplas_perCarbon_light$value)
+colnames(mplas_perCarbon_light)[colnames(mplas_perCarbon_light) == "value"] = "plas"
+colnames(mplas_perCarbon_light)[colnames(mplas_perCarbon_light) == "variable"] = "soil"
+
+mplas_perCarbon_light$trait = "perCarbon"
+
+## perNitrogen
+mplas_perNitrogen_light=as.data.frame(plas_perNitrogen)
+
+mplas_perNitrogen_light=melt(mplas_perNitrogen_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu"))
+mplas_perNitrogen_light$abs=abs(mplas_perNitrogen_light$value)
+colnames(mplas_perNitrogen_light)[colnames(mplas_perNitrogen_light) == "value"] = "plas"
+colnames(mplas_perNitrogen_light)[colnames(mplas_perNitrogen_light) == "variable"] = "soil"
+
+mplas_perNitrogen_light$trait = "perNitrogen"
+
+## CNR
+mplas_CNR_light=as.data.frame(plas_CNR)
+
+mplas_CNR_light=melt(mplas_CNR_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu"))
+mplas_CNR_light$abs=abs(mplas_CNR_light$value)
+colnames(mplas_CNR_light)[colnames(mplas_CNR_light) == "value"] = "plas"
+colnames(mplas_CNR_light)[colnames(mplas_CNR_light) == "variable"] = "soil"
+
+mplas_CNR_light$trait = "CNR"
+
+## absgrowth rate of number of leaves
+mplas_NLeaf_agr_light=as.data.frame(plas_nleaf_gr)
+
+mplas_NLeaf_agr_light=melt(mplas_NLeaf_agr_light,
+                    id.vars=c("species", "habitat"),
+                    measure.vars= c("C.gu", "S.gu")
+                    )
+mplas_NLeaf_agr_light$abs=abs(mplas_NLeaf_agr_light$value)
+colnames(mplas_NLeaf_agr_light)[colnames(mplas_NLeaf_agr_light) == "value"] = "plas"
+colnames(mplas_NLeaf_agr_light)[colnames(mplas_NLeaf_agr_light) == "variable"] = "soil"
+
+mplas_NLeaf_agr_light$trait = "NLeaf_agr"
+
+## absgrowth rate of total biomass
+mplas_TotalBm_agr_light=as.data.frame(plas_total_bm_agr)
+
+mplas_TotalBm_agr_light=melt(mplas_TotalBm_agr_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu")
+                   )
+mplas_TotalBm_agr_light$abs=abs(mplas_TotalBm_agr_light$value)
+colnames(mplas_TotalBm_agr_light)[colnames(mplas_TotalBm_agr_light) == "value"] = "plas"
+colnames(mplas_TotalBm_agr_light)[colnames(mplas_TotalBm_agr_light) == "variable"] = "soil"
+
+mplas_TotalBm_agr_light$trait = "TotalBm_agr"
+
+## Relative growth rate of height
+mplas_Height_rgr_light=as.data.frame(plas_height_rgr)
+
+mplas_Height_rgr_light=melt(mplas_Height_rgr_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu")
+                   )
+mplas_Height_rgr_light$abs=abs(mplas_Height_rgr_light$value)
+colnames(mplas_Height_rgr_light)[colnames(mplas_Height_rgr_light) == "value"] = "plas"
+colnames(mplas_Height_rgr_light)[colnames(mplas_Height_rgr_light) == "variable"] = "soil"
+
+mplas_Height_rgr_light$trait = "Height_rgr"
+
+## Relative growth rate of diameter
+mplas_Diam_rgr_light=as.data.frame(plas_diameter_rgr)
+
+mplas_Diam_rgr_light=melt(mplas_Diam_rgr_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu")
+                   )
+mplas_Diam_rgr_light$abs=abs(mplas_Diam_rgr_light$value)
+colnames(mplas_Diam_rgr_light)[colnames(mplas_Diam_rgr_light) == "value"] = "plas"
+colnames(mplas_Diam_rgr_light)[colnames(mplas_Diam_rgr_light) == "variable"] = "soil"
+
+mplas_Diam_rgr_light$trait = "Diam_rgr"
+
+## Relative growth rate of number of leaves
+mplas_NLeaf_rgr_light=as.data.frame(plas_nleaf_rgr)
+
+mplas_NLeaf_rgr_light=melt(mplas_NLeaf_rgr_light,
+                   id.vars=c("species", "habitat"),
+                   measure.vars= c("C.gu", "S.gu"))
+mplas_NLeaf_rgr_light$abs=abs(mplas_NLeaf_rgr_light$value)
+colnames(mplas_NLeaf_rgr_light)[colnames(mplas_NLeaf_rgr_light) == "value"] = "plas"
+colnames(mplas_NLeaf_rgr_light)[colnames(mplas_NLeaf_rgr_light) == "variable"] = "soil"
+
+mplas_NLeaf_rgr_light$trait = "NLeaf_rgr"
+
+
+# ## srpa
+# mplas_srpa=as.data.frame(plas_srpa)
+# 
+# mplas_srpa=melt(mplas_srpa,
+#                 id.vars=c("species", "habitat"),
+#                 measure.vars= c("C.gu", "S.gu"))
+# mplas_srpa$abs=abs(mplas_srpa$value)
+# colnames(mplas_srpa)[colnames(mplas_srpa) == "value"] = "plas"
+# 
+# ## srsa
+# mplas_srsa=as.data.frame(plas_srsa)
+# 
+# mplas_srsa=melt(mplas_srsa,
+#                 id.vars=c("species", "habitat"),
+#                 measure.vars= c("C.gu", "S.gu"))
+# mplas_srsa$abs=abs(mplas_srsa$value)
+# colnames(mplas_srsa)[colnames(mplas_srsa) == "value"] = "plas"
+# 
+# ## srd
+# mplas_srd=as.data.frame(plas_srd)
+# 
+# mplas_srd=melt(mplas_srd,
+#                id.vars=c("species", "habitat"),
+#                measure.vars= c("C.gu", "S.gu"))
+# mplas_srd$abs=abs(mplas_srd$value)
+# colnames(mplas_srd)[colnames(mplas_srd) == "value"] = "plas"
+# 
+# ## srv
+# mplas_srv=as.data.frame(plas_srv)
+# 
+# mplas_srv=melt(mplas_srv,
+#                id.vars=c("species", "habitat"),
+#                measure.vars= c("C.gu", "S.gu"))
+# mplas_srv$abs=abs(mplas_srv$value)
+# colnames(mplas_srv)[colnames(mplas_srv) == "value"] = "plas"
+```
+
+```{r plas_soil, warning=F, echo=F, message=F, include=F}
+# Plasticity vs Plasticity due to soil
+
+
+# Only select relevant colums in dataframe
+##Stem density
+
+mplas_SDen_soil=as.data.frame(plas_stem_density)
+
+mplas_SDen_soil=melt(mplas_SDen_soil, 
+                      id.vars=c("species", "habitat"),
+                      measure.vars= c("G.cs", "U.cs")
+)
+mplas_SDen_soil$abs=abs(mplas_SDen_soil$value)
+colnames(mplas_SDen_soil)[colnames(mplas_SDen_soil) == "value"] = "plas"
+colnames(mplas_SDen_soil)[colnames(mplas_SDen_soil) == "variable"] = "light"
+
+mplas_SDen_soil$trait = "SDen"
+
+## Root density
+
+mplas_RDen_soil=as.data.frame(plas_root_density)
+
+mplas_RDen_soil=melt(mplas_RDen_soil, 
+                      id.vars=c("species", "habitat"),
+                      measure.vars= c("G.cs", "U.cs")
+)
+mplas_RDen_soil$abs=abs(mplas_RDen_soil$value)
+colnames(mplas_RDen_soil)[colnames(mplas_RDen_soil) == "value"] = "plas"
+colnames(mplas_RDen_soil)[colnames(mplas_RDen_soil) == "variable"] = "light"
+
+mplas_RDen_soil$trait = "RDen"
+
+## Lamina density
+mplas_LDen_soil=as.data.frame(plas_leaf_density)
+
+mplas_LDen_soil=melt(mplas_LDen_soil,
+                      id.vars=c("species", "habitat"),
+                      measure.vars= c("G.cs", "U.cs")
+)
+mplas_LDen_soil$abs=abs(mplas_LDen_soil$value)
+colnames(mplas_LDen_soil)[colnames(mplas_LDen_soil) == "value"] = "plas"
+colnames(mplas_LDen_soil)[colnames(mplas_LDen_soil) == "variable"] = "light"
+
+mplas_LDen_soil$trait = "LDen"
+
+## SLA
+mplas_SLA_soil=as.data.frame(plas_mean_sla)
+
+mplas_SLA_soil=melt(mplas_SLA_soil, 
+                     id.vars=c("species", "habitat"),
+                     measure.vars= c("G.cs", "U.cs")
+)
+mplas_SLA_soil$abs=abs(mplas_SLA_soil$value)
+colnames(mplas_SLA_soil)[colnames(mplas_SLA_soil) == "value"] = "plas"
+colnames(mplas_SLA_soil)[colnames(mplas_SLA_soil) == "variable"] = "light"
+
+mplas_SLA_soil$trait = "SLA"
+
+## Lamina thickness
+mplas_LamThick_soil=as.data.frame(plas_avg_thickness_mm)
+
+mplas_LamThick_soil=melt(mplas_LamThick_soil,
+                          id.vars=c("species", "habitat"),
+                          measure.vars= c("G.cs", "U.cs")
+)
+mplas_LamThick_soil$abs=abs(mplas_LamThick_soil$value)
+colnames(mplas_LamThick_soil)[colnames(mplas_LamThick_soil) == "value"] = "plas"
+colnames(mplas_LamThick_soil)[colnames(mplas_LamThick_soil) == "variable"] = "light"
+
+mplas_LamThick_soil$trait = "LamThick"
+
+## Lamina Area
+mplas_LamArea_soil=as.data.frame(plas_mean_leaf_area)
+
+mplas_LamArea_soil=melt(mplas_LamArea_soil,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("G.cs", "U.cs")
+)
+mplas_LamArea_soil$abs=abs(mplas_LamArea_soil$value)
+colnames(mplas_LamArea_soil)[colnames(mplas_LamArea_soil) == "value"] = "plas"
+colnames(mplas_LamArea_soil)[colnames(mplas_LamArea_soil) == "variable"] = "light"
+
+mplas_LamArea_soil$trait = "LamArea"
+
+## LMR
+mplas_LMR_soil=as.data.frame(plas_lmr)
+
+mplas_LMR_soil=melt(mplas_LMR_soil,
+                     id.vars=c("species", "habitat"),
+                     measure.vars= c("G.cs", "U.cs")
+)
+mplas_LMR_soil$abs=abs(mplas_LMR_soil$value)
+colnames(mplas_LMR_soil)[colnames(mplas_LMR_soil) == "value"] = "plas"
+colnames(mplas_LMR_soil)[colnames(mplas_LMR_soil) == "variable"] = "light"
+
+mplas_LMR_soil$trait = "LMR"
+
+## RMR
+mplas_RMR_soil=as.data.frame(plas_rmr)
+
+mplas_RMR_soil=melt(mplas_RMR_soil,
+                     id.vars=c("species", "habitat"),
+                     measure.vars= c("G.cs", "U.cs")
+)
+mplas_RMR_soil$abs=abs(mplas_RMR_soil$value)
+colnames(mplas_RMR_soil)[colnames(mplas_RMR_soil) == "value"] = "plas"
+colnames(mplas_RMR_soil)[colnames(mplas_RMR_soil) == "variable"] = "light"
+
+mplas_RMR_soil$trait = "RMR"
+
+## LAR
+mplas_LAR_soil=as.data.frame(plas_lar)
+
+mplas_LAR_soil=melt(mplas_LAR_soil,
+                     id.vars=c("species", "habitat"),
+                     measure.vars= c("G.cs", "U.cs")
+)
+mplas_LAR_soil$abs=abs(mplas_LAR_soil$value)
+colnames(mplas_LAR_soil)[colnames(mplas_LAR_soil) == "value"] = "plas"
+colnames(mplas_LAR_soil)[colnames(mplas_LAR_soil) == "variable"] = "light"
+
+mplas_LAR_soil$trait = "LAR"
+
+## Root depth
+mplas_RDepth_soil=as.data.frame(plas_depth)
+
+mplas_RDepth_soil=melt(mplas_RDepth_soil,
+                        id.vars=c("species", "habitat"),
+                        measure.vars= c("G.cs", "U.cs")
+)
+mplas_RDepth_soil$abs=abs(mplas_RDepth_soil$value)
+colnames(mplas_RDepth_soil)[colnames(mplas_RDepth_soil) == "value"] = "plas"
+colnames(mplas_RDepth_soil)[colnames(mplas_RDepth_soil) == "variable"] = "light"
+
+mplas_RDepth_soil$trait = "RDepth"
+
+## Percent aboveground biomass
+mplas_PerAbov_soil=as.data.frame(plas_per_above)
+
+mplas_PerAbov_soil=melt(mplas_PerAbov_soil,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("G.cs", "U.cs")
+)
+mplas_PerAbov_soil$abs=abs(mplas_PerAbov_soil$value)
+colnames(mplas_PerAbov_soil)[colnames(mplas_PerAbov_soil) == "value"] = "plas"
+colnames(mplas_PerAbov_soil)[colnames(mplas_PerAbov_soil) == "variable"] = "light"
+
+mplas_PerAbov_soil$trait = "PerAbov"
+
+## Percent stem biomass
+mplas_PerStem_soil=as.data.frame(plas_per_stem_weight)
+
+mplas_PerStem_soil=melt(mplas_PerStem_soil,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("G.cs", "U.cs")
+)
+mplas_PerStem_soil$abs=abs(mplas_PerStem_soil$value)
+colnames(mplas_PerStem_soil)[colnames(mplas_PerStem_soil) == "value"] = "plas"
+colnames(mplas_PerStem_soil)[colnames(mplas_PerStem_soil) == "variable"] = "light"
+
+mplas_PerStem_soil$trait = "PerStem"
+
+## Fine Root Length
+mplas_frl_soil=as.data.frame(plas_frl)
+
+mplas_frl_soil=melt(mplas_frl_soil,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("G.cs", "U.cs")
+)
+mplas_frl_soil$abs=abs(mplas_frl_soil$value)
+colnames(mplas_frl_soil)[colnames(mplas_frl_soil) == "value"] = "plas"
+colnames(mplas_frl_soil)[colnames(mplas_frl_soil) == "variable"] = "light"
+
+mplas_frl_soil$trait = "frl"
+
+## Fine Root Length
+mplas_FRMR_soil=as.data.frame(plas_FRMR)
+
+mplas_FRMR_soil=melt(mplas_FRMR_soil,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("G.cs", "U.cs")
+)
+mplas_FRMR_soil$abs=abs(mplas_FRMR_soil$value)
+colnames(mplas_FRMR_soil)[colnames(mplas_FRMR_soil) == "value"] = "plas"
+colnames(mplas_FRMR_soil)[colnames(mplas_FRMR_soil) == "variable"] = "light"
+
+mplas_FRMR_soil$trait = "FRMR"
+
+## Specific Root Length
+mplas_srl_soil=as.data.frame(plas_srl)
+
+mplas_srl_soil=melt(mplas_srl_soil,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("G.cs", "U.cs")
+)
+mplas_srl_soil$abs=abs(mplas_srl_soil$value)
+colnames(mplas_srl_soil)[colnames(mplas_srl_soil) == "value"] = "plas"
+colnames(mplas_srl_soil)[colnames(mplas_srl_soil) == "variable"] = "light"
+
+mplas_srl_soil$trait = "srl"
+
+## Percentage Carbon
+mplas_perCarbon_soil=as.data.frame(plas_perCarbon)
+
+mplas_perCarbon_soil=melt(mplas_perCarbon_soil,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("G.cs", "U.cs")
+)
+mplas_perCarbon_soil$abs=abs(mplas_perCarbon_soil$value)
+colnames(mplas_perCarbon_soil)[colnames(mplas_perCarbon_soil) == "value"] = "plas"
+colnames(mplas_perCarbon_soil)[colnames(mplas_perCarbon_soil) == "variable"] = "light"
+
+mplas_perCarbon_soil$trait = "perCarbon"
+
+## Percentage Nitrogen
+mplas_perNitrogen_soil=as.data.frame(plas_perNitrogen)
+
+mplas_perNitrogen_soil=melt(mplas_perNitrogen_soil,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("G.cs", "U.cs")
+)
+mplas_perNitrogen_soil$abs=abs(mplas_perNitrogen_soil$value)
+colnames(mplas_perNitrogen_soil)[colnames(mplas_perNitrogen_soil) == "value"] = "plas"
+colnames(mplas_perNitrogen_soil)[colnames(mplas_perNitrogen_soil) == "variable"] = "light"
+
+mplas_perNitrogen_soil$trait = "perNitrogen"
+
+## Percentage Nitrogen
+mplas_CNR_soil=as.data.frame(plas_CNR)
+
+mplas_CNR_soil=melt(mplas_CNR_soil,
+                         id.vars=c("species", "habitat"),
+                         measure.vars= c("G.cs", "U.cs")
+)
+mplas_CNR_soil$abs=abs(mplas_CNR_soil$value)
+colnames(mplas_CNR_soil)[colnames(mplas_CNR_soil) == "value"] = "plas"
+colnames(mplas_CNR_soil)[colnames(mplas_CNR_soil) == "variable"] = "light"
+
+mplas_CNR_soil$trait = "CNR"
+
+## absgrowth rate of lamina area 
+mplas_LamArea_agr_soil=as.data.frame(plas_leaf_area_agr)
+
+mplas_LamArea_agr_soil=melt(mplas_LamArea_agr_soil,
+                             id.vars=c("species", "habitat"),
+                             measure.vars= c("G.cs", "U.cs")
+)
+mplas_LamArea_agr_soil$abs=abs(mplas_LamArea_agr_soil$value)
+colnames(mplas_LamArea_agr_soil)[colnames(mplas_LamArea_agr_soil) == "value"] = "plas"
+colnames(mplas_LamArea_agr_soil)[colnames(mplas_LamArea_agr_soil) == "variable"] = "light"
+
+mplas_LamArea_agr_soil$trait = "LamArea_agr"
+
+## absgrowth rate of number of leaves
+mplas_NLeaf_agr_soil=as.data.frame(plas_nleaf_gr)
+
+mplas_NLeaf_agr_soil=melt(mplas_NLeaf_agr_soil,
+                           id.vars=c("species", "habitat"),
+                           measure.vars= c("G.cs", "U.cs")
+)
+mplas_NLeaf_agr_soil$abs=abs(mplas_NLeaf_agr_soil$value)
+colnames(mplas_NLeaf_agr_soil)[colnames(mplas_NLeaf_agr_soil) == "value"] = "plas"
+colnames(mplas_NLeaf_agr_soil)[colnames(mplas_NLeaf_agr_soil) == "variable"] = "light"
+
+mplas_NLeaf_agr_soil$trait = "NLeaf_agr"
+
+## absgrowth rate of total biomass
+mplas_TotalBm_agr_soil=as.data.frame(plas_total_bm_agr)
+
+mplas_TotalBm_agr_soil=melt(mplas_TotalBm_agr_soil,
+                             id.vars=c("species", "habitat"),
+                             measure.vars= c("G.cs", "U.cs")
+)
+mplas_TotalBm_agr_soil$abs=abs(mplas_TotalBm_agr_soil$value)
+colnames(mplas_TotalBm_agr_soil)[colnames(mplas_TotalBm_agr_soil) == "value"] = "plas"
+colnames(mplas_TotalBm_agr_soil)[colnames(mplas_TotalBm_agr_soil) == "variable"] = "light"
+
+mplas_TotalBm_agr_soil$trait = "TotalBm_agr"
+
+## Relative growth rate of height
+mplas_Height_rgr_soil=as.data.frame(plas_height_rgr)
+
+mplas_Height_rgr_soil=melt(mplas_Height_rgr_soil,
+                            id.vars=c("species", "habitat"),
+                            measure.vars= c("G.cs", "U.cs")
+)
+mplas_Height_rgr_soil$abs=abs(mplas_Height_rgr_soil$value)
+colnames(mplas_Height_rgr_soil)[colnames(mplas_Height_rgr_soil) == "value"] = "plas"
+colnames(mplas_Height_rgr_soil)[colnames(mplas_Height_rgr_soil) == "variable"] = "light"
+
+mplas_Height_rgr_soil$trait = "Height_rgr"
+
+## Relative growth rate of diameter
+mplas_Diam_rgr_soil=as.data.frame(plas_diameter_rgr)
+
+mplas_Diam_rgr_soil=melt(mplas_Diam_rgr_soil,
+                          id.vars=c("species", "habitat"),
+                          measure.vars= c("G.cs", "U.cs")
+)
+mplas_Diam_rgr_soil$abs=abs(mplas_Diam_rgr_soil$value)
+colnames(mplas_Diam_rgr_soil)[colnames(mplas_Diam_rgr_soil) == "value"] = "plas"
+colnames(mplas_Diam_rgr_soil)[colnames(mplas_Diam_rgr_soil) == "variable"] = "light"
+
+mplas_Diam_rgr_soil$trait = "Diam_rgr"
+
+## Relative growth rate of number of leaves
+mplas_NLeaf_rgr_soil=as.data.frame(plas_nleaf_rgr)
+
+mplas_NLeaf_rgr_soil=melt(mplas_NLeaf_rgr_soil,
+                           id.vars=c("species", "habitat"),
+                           measure.vars= c("G.cs", "U.cs"))
+mplas_NLeaf_rgr_soil$abs=abs(mplas_NLeaf_rgr_soil$value)
+colnames(mplas_NLeaf_rgr_soil)[colnames(mplas_NLeaf_rgr_soil) == "value"] = "plas"
+colnames(mplas_NLeaf_rgr_soil)[colnames(mplas_NLeaf_rgr_soil) == "variable"] = "light"
+
+mplas_NLeaf_rgr_soil$trait = "NLeaf_rgr"
+
+# 
+# 
+# ## srl
+# mplas_srl=as.data.frame(plas_srl)
+# 
+# mplas_srl=melt(mplas_srl,
+#                id.vars=c("species", "habitat"),
+#                measure.vars= c("G.cs", "U.cs"))
+# mplas_srl$abs=abs(mplas_srl$value)
+# colnames(mplas_srl)[colnames(mplas_srl) == "value"] = "plas"
+# 
+# ## srpa
+# mplas_srpa=as.data.frame(plas_srpa)
+# 
+# mplas_srpa=melt(mplas_srpa,
+#                 id.vars=c("species", "habitat"),
+#                 measure.vars= c("G.cs", "U.cs"))
+# mplas_srpa$abs=abs(mplas_srpa$value)
+# colnames(mplas_srpa)[colnames(mplas_srpa) == "value"] = "plas"
+# 
+# ## srsa
+# mplas_srsa=as.data.frame(plas_srsa)
+# 
+# mplas_srsa=melt(mplas_srsa,
+#                 id.vars=c("species", "habitat"),
+#                 measure.vars= c("G.cs", "U.cs"))
+# mplas_srsa$abs=abs(mplas_srsa$value)
+# colnames(mplas_srsa)[colnames(mplas_srsa) == "value"] = "plas"
+# 
+# ## srd
+# mplas_srd=as.data.frame(plas_srd)
+# 
+# mplas_srd=melt(mplas_srd,
+#                id.vars=c("species", "habitat"),
+#                measure.vars= c("G.cs", "U.cs"))
+# mplas_srd$abs=abs(mplas_srd$value)
+# colnames(mplas_srd)[colnames(mplas_srd) == "value"] = "plas"
+# 
+# ## srv
+# mplas_srv=as.data.frame(plas_srv)
+# 
+# mplas_srv=melt(mplas_srv,
+#                id.vars=c("species", "habitat"),
+#                measure.vars= c("G.cs", "U.cs"))
+# mplas_srv$abs=abs(mplas_srv$value)
+# colnames(mplas_srv)[colnames(mplas_srv) == "value"] = "plas"
+```
+
+
+
+```{r allplas.light, warning=F, echo=F, include=F}
+
+allplasL=rbind(
+  mplas_SDen_light, 
+  mplas_RDen_light,
+  mplas_LDen_light,
+  mplas_SLA_light,
+  mplas_LamThick_light,
+  mplas_LamArea_light,
+  mplas_LMR_light,
+  mplas_RMR_light,
+  mplas_LAR_light,
+  mplas_RDepth_light,
+  mplas_PerAbov_light,
+  mplas_PerStem_light,
+  mplas_frl_light,
+  mplas_srl_light,
+  mplas_FRMR_light,
+  mplas_perCarbon_light,
+  mplas_perNitrogen_light,
+  mplas_CNR_light,
+  mplas_LamArea_agr_light,
+  mplas_NLeaf_agr_light,
+  mplas_TotalBm_agr_light,
+  mplas_Height_rgr_light,
+  mplas_Diam_rgr_light,
+  mplas_NLeaf_rgr_light)
+
+write.csv(allplasL, "allplasL_ori.csv")
+
+table(allplasL$trait)
+
+table(allplasL$trait, allplasL$soil, allplasL$habitat)
+
+attach(allplasL)
+allPlasL_C.gu = allplasL[ which(soil=='C.gu'),]
+allPlasL_S.gu = allplasL[ which(soil=='S.gu'),]
+detach(allplasL) 
+
+allPlasL_C.gu$trait = with(allPlasL_C.gu, reorder(trait, abs, FUN = median, na.rm = T))
+allPlasL_S.gu$trait = with(allPlasL_S.gu, reorder(trait, abs, FUN = median, na.rm = T))
+
+# boxplot(abs~trait, data=allPlasL_C.gu, ylim=c(0,4), main="Plasticity due to light in clay", las=2)
+# boxplot(abs~trait, data=allPlasL_S.gu, ylim=c(0,4), main="Plasticity due to light in sandy loam", las=2)
+
+allplasL.anov = anova(lmer(log(abs) ~ trait*habitat*soil + (1|species), data=allplasL, REML=T))
+
+capture.output(allplasL.anov,file="allplasL_anov.csv")
+
+# write.csv(allplasL, "allplasL.csv")
+```
+
+```{r allplas.soil, warning=F, echo=F, include=F}
+
+allplasS=rbind(
+  mplas_SDen_soil, 
+  mplas_RDen_soil,
+  mplas_LDen_soil,
+  mplas_SLA_soil,
+  mplas_LamThick_soil,
+  mplas_LamArea_soil,
+  mplas_LMR_soil,
+  mplas_RMR_soil,
+  mplas_LAR_soil,
+  mplas_RDepth_soil,
+  mplas_PerAbov_soil,
+  mplas_PerStem_soil,
+  mplas_frl_soil,
+  mplas_srl_soil,
+  mplas_FRMR_soil,
+  mplas_perCarbon_soil,
+  mplas_perNitrogen_soil,
+  mplas_CNR_soil,
+  mplas_LamArea_agr_soil,
+  mplas_NLeaf_agr_soil,
+  mplas_TotalBm_agr_soil,
+  mplas_Height_rgr_soil,
+  mplas_Diam_rgr_soil,
+  mplas_NLeaf_rgr_soil)
+
+write.csv(allplasS, "allplasS_ori.csv")
+
+table(allplasS$trait)
+
+table(allplasS$trait, allplasS$light, allplasS$habitat)
+
+attach(allplasS)
+allPlasS_G.cs = allplasS[ which(light=='G.cs'),]
+allPlasS_U.cs = allplasS[ which(light=='U.cs'),]
+detach(allplasS) 
+
+allPlasS_G.cs$trait = with(allPlasS_G.cs, reorder(trait, abs, FUN = median, na.rm = T))
+allPlasS_U.cs$trait = with(allPlasS_U.cs, reorder(trait, abs, FUN = median, na.rm = T))
+
+levels(allPlasS_G.cs$trait)
+
+par(mfrow=c(1,2))
+boxplot(abs~trait, data=allPlasS_G.cs, ylim=c(0,4), main="Plasticity due to soil in gap")
+boxplot(abs~trait, data=allPlasS_U.cs, ylim=c(0,4), main="Plasticity due to soil in understory")
+
+
+allplasS.anov = anova(lmer(abs ~ trait*habitat*light + (1|species), data=allplasS, REML=T))
+
+capture.output(allplasS.anov,file="allplasS_anov.csv")
+
+# write.csv(allplasS, "allplasS.csv")
+```
+
+```{r plot.allplas, include=F, echo=F, warning=F}
+allplasS.temp = allplasS
+allplasL.temp = allplasL
+
+colnames(allplasS.temp)[colnames(allplasS.temp)=="light"] <- "treatment"
+colnames(allplasL.temp)[colnames(allplasL.temp)=="soil"] <- "treatment"
+
+allplas = rbind(
+  allplasL.temp,
+  allplasS.temp
+)
+levels(allplas$habitat)
+
+levels(allplas$habitat) = c("Clay Specialists", "Generalists", "Sandy Loam Specialists")
+
+levels(allplas$treatment)
+
+levels(allplas$treatment) = c("Plasticity due to light treatment in clay soil",
+                              "Plasticity due to light treatment in sandy loam soil",
+                              "Plasticity due to soil treatment in high light",
+                              "Plasticity due to soil treatment in low light")
+
+allplas$category = allplas$trait
+
+allplas$category = gsub("(LamArea_agr|NLeaf_agr|TotalBm_agr|Height_rgr|Diam_rgr|
+                        NLeaf_rgr)",
+                        "Growth Rate Traits",
+                        allplas$category)
+
+allplas$category = gsub("(SDen|RDen|LDen|SLA|LamThick|LamArea|srl)",
+                        "Organ Structural Traits",
+                        allplas$category)
+
+allplas$category = gsub("(LMR|RMR|LAR|RDepth|PerAbov|PerStem|frl|FRMR|perCarbon|perNitrogen|CNR)",
+                        "Allocation Traits",
+                        allplas$category)
+
+SUM.allplas = summarySE(allplas, measurevar = "abs", groupvars = c("treatment", "trait"), na.rm = T)
+
+str(SUM.allplas)
+SUM.allplas$trait = as.factor(SUM.allplas$trait)
+
+# Plasticity bargraph with SE
+
+ggplot(data=SUM.allplas, 
+       aes(x=trait, y=abs, fill = trait)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-se, ymax=abs+se),
+                width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for measured traits with 95% confidence interval") +
+  facet_wrap(~treatment, ncol = 2) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+# Plasticity bargraph with 95% CI
+
+REL.allplas = SUM.allplas
+REL = subset(REL.allplas, treatment == "Plasticity due to light treatment in clay soil")
+REL = subset(REL.allplas, treatment == "Plasticity due to light treatment in sandy loam soil")
+REL = subset(REL.allplas, treatment == "Plasticity due to soil treatment in high light")
+REL = subset(REL.allplas, treatment == "Plasticity due to soil treatment in low light")
+
+levels(REL$trait)
+
+REL$trait = with(REL, reorder(trait, abs, order = T))
+levels(REL$trait)
+
+levels(REL.allplas$trait)
+REL.allplas$trait = factor(REL.allplas$trait, levels = levels(REL$trait))
+
+ggplot(
+  # data=allplas,
+  data=subset(REL.allplas, treatment %in% "Plasticity due to light treatment in clay soil"), 
+  # aes(x = trait, y = abs, fill = trait)) +
+  aes(x = reorder(trait, abs, order = T), y = abs, fill = trait)) +
+  # geom_boxplot() +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci),
+                width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for measured traits with 95% confidence interval") +
+  facet_wrap(~treatment, ncol = 2) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+# Boxplot
+
+# Thanks Jim Muirhead! http://stackoverflow.com/a/35809235/3785051
+# In order to get the position of each of the traits, get the median values for the column values in your data frame for every combination of type and treatment, and then rank these to get the plot order in each panel.
+
+allplas2 <- allplas %>% 
+  group_by(treatment, trait) %>% 
+  # summarise(med = median(abs, na.rm = T)) %>% 
+  summarise(med = boxplot.stats(abs)$stats[3]) %>% 
+  # summarise(ylim1 = boxplot.stats(abs)$stats[c(1, 5)]) %>%
+  mutate(plot_order = rank(med))
+
+write.csv(allplas2, "plot_order.csv")
+
+# Join the plot order data back to the original data set.
+
+allplas3 <- allplas %>% left_join(allplas2) %>% arrange(treatment, plot_order)
+
+# Extract the order of traits in the first panel, and use these to order the levels of the factor.
+
+treatment_a_order <- unique(allplas3[allplas3$treatment == "Plasticity due to light treatment in clay soil", "trait"])
+
+# treatment_a_order <- unique(allplas3[allplas3$treatment == "Plasticity due to light treatment in sandy loam soil", "trait"])
+
+# treatment_a_order <- unique(allplas3[allplas3$treatment == "Plasticity due to soil treatment in high light", "trait"])
+
+# treatment_a_order <- unique(allplas3[allplas3$treatment == "Plasticity due to soil treatment in low light", "trait"])
+
+# Re-code the levels of trait based on these re-ordered factors
+
+allplas4 <- mutate(allplas3, Traits = factor(trait, levels = treatment_a_order))
+
+BOX.allplas0 =
+
+  ggplot(allplas4, aes(x = plot_order, y=abs, fill=Traits)) + 
+  geom_boxplot() +
+  facet_wrap(~treatment, ncol = 1) + 
+  xlab("Treatments") +
+  ylab("Plasticity Index Value")+
+  coord_cartesian(ylim = c(0, 2)) +
+  theme(axis.text.x = element_blank(),
+        text = element_text(size = 15),
+        legend.text = element_text(size = 12),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+ggsave(
+  filename = "Boxplot_comparison.png",
+  plot = BOX.allplas0, 
+  width = 7,
+  height = 6,
+  units = "in")
+
+# BOX = subset(REL.allplas, treatment == "Plasticity due to light treatment in clay soil")
+# BOX = subset(REL.allplas, treatment == "Plasticity due to light treatment in sandy loam soil")
+# BOX = subset(REL.allplas, treatment == "Plasticity due to soil treatment in high light")
+# BOX = subset(REL.allplas, treatment == "Plasticity due to soil treatment in low light")
+# 
+# levels(BOX$trait)
+# 
+# levels(BOX.allplas$trait)
+# BOX.allplas$trait = factor(BOX.allplas$trait, levels = levels(BOX$trait))
+# 
+# ggplot(data=subset(BOX.allplas, treatment %in% "Plasticity due to light treatment in clay soil"), 
+#        aes(x=reorder(trait, abs, order = T), y=abs, fill = trait)) +
+#   geom_boxplot() +
+#   xlab("Functional traits") +
+#   ylab("Plasticity index value")+
+#   # ggtitle("Mean values of plasticity for measured traits with 95% confidence interval") +
+#   facet_wrap(~treatment, ncol = 2) +
+#   theme(
+#         panel.background = element_blank(),
+#         panel.border = element_rect(colour = "black", fill=NA))
+# 
+# ggplot(data=subset(BOX.allplas, treatment %in% "Plasticity due to light treatment in sandy loam soil"), 
+#        aes(x=reorder(trait, abs, order = T), y=abs, fill = trait)) +
+#   geom_boxplot() +
+#   xlab("Functional traits") +
+#   ylab("Plasticity index value")+
+#   # ggtitle("Mean values of plasticity for measured traits with 95% confidence interval") +
+#   facet_wrap(~treatment, ncol = 2) +
+#   theme(
+#         panel.background = element_blank(),
+#         panel.border = element_rect(colour = "black", fill=NA))
+# 
+# ggplot(data=subset(BOX.allplas, treatment %in% "Plasticity due to soil treatment in high light"), 
+#        aes(x=reorder(trait, abs, order = T), y=abs, fill = trait)) +
+#   geom_boxplot() +
+#   xlab("Functional traits") +
+#   ylab("Plasticity index value")+
+#   # ggtitle("Mean values of plasticity for measured traits with 95% confidence interval") +
+#   facet_wrap(~treatment, ncol = 2) +
+#   theme(
+#         panel.background = element_blank(),
+#         panel.border = element_rect(colour = "black", fill=NA))
+# 
+# ggplot(data=subset(BOX.allplas, treatment %in% "Plasticity due to soil treatment in low light"), 
+#        aes(x=reorder(trait, abs, order = T), y=abs, fill = trait)) +
+#   geom_boxplot() +
+#   xlab("Functional traits") +
+#   ylab("Plasticity index value")+
+#   # ggtitle("Mean values of plasticity for measured traits with 95% confidence interval") +
+#   facet_wrap(~treatment, ncol = 2) +
+#   theme(
+#         panel.background = element_blank(),
+#         panel.border = element_rect(colour = "black", fill=NA))
+```
+
+```{r rank.test, include=F, echo=F, warning=F}
+# Setup dataframe for light plasticity plot
+
+rankL <- allplas %>% 
+  group_by(treatment, trait) %>% 
+  summarise(med = boxplot.stats(abs)$stats[3])
+
+m.rankL = melt(rankL, id.vars = c("treatment", "trait"))
+c.rankL = dcast(m.rankL, trait ~ treatment )
+
+# Plasticity due to light
+
+cor.test(
+  c.rankL$`Plasticity due to light treatment in clay soil`,
+  c.rankL$`Plasticity due to light treatment in sandy loam soil`,
+  alternative = "two.sided",
+  method = "kendall"
+)
+
+KTest_light =
+ggplot(c.rankL, aes(x = `Plasticity due to light treatment in clay soil`, 
+                    y = `Plasticity due to light treatment in sandy loam soil`,
+                    label = trait)) +
+  geom_point(size = rel(3)) +
+  geom_text_repel(size = rel(5)) +
+  geom_abline() +
+  geom_smooth(method = "lm") +
+  # ggtitle("p <0.01, tau = 0.83") +
+  scale_y_continuous(limits = c(0, 2)) +
+  scale_x_continuous(limits = c(0, 2)) +
+  # coord_cartesian(xlim = c(0, 2)) +
+  # coord_cartesian(ylim = c(0, 2)) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 20),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA)
+        )
+
+# Concordance is high and significant, indicating no change in rank due to differing soil treatments for plasticity due to light.
+
+
+# Setup dataframe for soil plasticity plot
+
+rankS <- allplas %>% 
+  group_by(treatment, trait) %>% 
+  summarise(med = boxplot.stats(abs)$stats[3])
+
+m.rankS = melt(rankS, id.vars = c("treatment", "trait"))
+c.rankS = dcast(m.rankS, trait ~ treatment )
+
+# Plasticity due to soil
+
+cor.test(
+  c.rankL$`Plasticity due to soil treatment in high light`,
+  c.rankL$`Plasticity due to soil treatment in low light`,
+  alternative = "two.sided",
+  method = "kendall"
+)
+
+KTest_soil =
+ggplot(c.rankS, aes(x = `Plasticity due to soil treatment in high light`, 
+                    y = `Plasticity due to soil treatment in low light`,
+                    label = trait
+                    # color = trait
+                    )) +
+  geom_point(size = rel(3)) +
+  geom_text_repel(size = rel(5)) +
+  scale_y_continuous(limits = c(0, 2)) +
+  scale_x_continuous(limits = c(0, 2)) +
+  geom_smooth(method = "lm") +
+  geom_abline() +
+  # ggtitle("p <0.01, tau = 0.57") +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 20),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA)
+        )
+
+
+pdf(file="rank_test.pdf")
+
+KTest_light
+KTest_soil
+
+dev.off()
+
+ggsave(
+  filename = "KTest_light.png",
+  plot = KTest_light, 
+  width = 6,
+  height = 6,
+  units = "in")
+
+ggsave(
+  filename = "KTest_soil.png",
+  plot = KTest_soil, 
+  width = 6,
+  height = 6,
+  units = "in")
+```
+
+
+```{r plot.trait.CI, include=F, echo=F, warning=F}
+
+SUM.allplas2 = summarySE(allplas, measurevar = "abs", groupvars = c("habitat", "treatment", "trait"), na.rm = T)
+
+plot_SDen =
+ggplot(data=subset(SUM.allplas2, trait %in% "SDen"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for density of stem density with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  scale_fill_discrete(name = "Treatments") +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        legend.direction="vertical",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_RDen =
+ggplot(data=subset(SUM.allplas2, trait %in% "RDen"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for density of root density with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_LDen =
+ggplot(data=subset(SUM.allplas2, trait %in% "LDen"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for density of leaf density with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_SLA =
+ggplot(data=subset(SUM.allplas2, trait %in% "SLA"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for SLA with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_LamThick =
+ggplot(data=subset(SUM.allplas2, trait %in% "LamThick"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for lamina thickness with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_LamArea =
+ggplot(data=subset(SUM.allplas2, trait %in% "LamArea"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for lamina area with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_LMR =
+ggplot(data=subset(SUM.allplas2, trait %in% "LMR"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for LMR with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_RMR =
+ggplot(data=subset(SUM.allplas2, trait %in% "RMR"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for RMR with 95% CI") +
+  facet_wrap(~habitat, ncol = 3) +
+  scale_fill_brewer(palette="OrRd") +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_LAR =
+ggplot(data=subset(SUM.allplas2, trait %in% "LAR"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for LAR with 95% CI") +
+  facet_wrap(~habitat, ncol = 3) +
+  scale_fill_brewer(palette="OrRd") +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_RDepth =
+ggplot(data=subset(SUM.allplas2, trait %in% "RDepth"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for root depth with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_PerAbov =
+ggplot(data=subset(SUM.allplas2, trait %in% "PerAbov"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for percentage of aboveground biomass with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_PerStem =
+ggplot(data=subset(SUM.allplas2, trait %in% "PerStem"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for percentage of stem biomass with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_frl =
+ggplot(data=subset(SUM.allplas2, trait %in% "frl"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for percentage of stem biomass with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_srl =
+ggplot(data=subset(SUM.allplas2, trait %in% "srl"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for percentage of stem biomass with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_FRMR =
+ggplot(data=subset(SUM.allplas2, trait %in% "FRMR"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for FRMR with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_perCarbon =
+ggplot(data=subset(SUM.allplas2, trait %in% "perCarbon"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for perCarbon with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_perNitrogen =
+ggplot(data=subset(SUM.allplas2, trait %in% "perNitrogen"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for perNitrogen with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_CNR =
+ggplot(data=subset(SUM.allplas2, trait %in% "CNR"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for CNR with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_LamArea_agr =
+ggplot(data=subset(SUM.allplas2, trait %in% "LamArea_agr"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for absolute growth rate of lamina area with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_NLeaf_agr =
+ggplot(data=subset(SUM.allplas2, trait %in% "NLeaf_agr"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for absolute growth rate of the number of leaves with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_TotalBm_agr =
+ggplot(data=subset(SUM.allplas2, trait %in% "TotalBm_agr"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for absolute growth rate of total biomass with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_Height_rgr =
+ggplot(data=subset(SUM.allplas2, trait %in% "Height_rgr"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for relative growth rate in height with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_Diam_rgr =
+ggplot(data=subset(SUM.allplas2, trait %in% "Diam_rgr"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for relative growth rate of diameter with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plot_NLeaf_rgr =
+ggplot(data=subset(SUM.allplas2, trait %in% "NLeaf_rgr"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = abs-ci, ymax=abs+ci), width = 0.2) +
+  xlab("Functional traits") +
+  ylab("Plasticity index value")+
+  ggtitle("Mean values of plasticity for relative growth rate of the number of leaves with 95% CI") +
+  scale_fill_brewer(palette="OrRd") +
+  facet_wrap(~habitat, ncol = 3) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+# Select files for PDF output
+pdf(file="bargraphs_CI.pdf")
+
+plot_SDen 
+plot_RDen
+plot_LDen
+plot_SLA
+plot_LamThick
+plot_LamArea
+plot_LMR
+plot_RMR
+plot_LAR
+plot_RDepth
+plot_PerAbov
+plot_PerStem
+plot_frl
+plot_srl
+plot_FRMR
+plot_perCarbon
+plot_perNitrogen
+plot_CNR
+plot_LamArea_agr
+plot_NLeaf_agr
+plot_TotalBm_agr
+plot_Height_rgr
+plot_Diam_rgr
+plot_NLeaf_rgr
+
+dev.off()
+```
+
+```{r plot.trait.boxplot.light, include=F, echo=F, warning=F}
+
+allplasL = filter(allplas,
+                  treatment == "Plasticity due to light treatment in clay soil" |
+                  treatment == "Plasticity due to light treatment in sandy loam soil"
+                    )
+
+plotOST.L =
+ggplot(data=subset(allplasL, category %in% "Organ Structural Traits"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_boxplot() +
+  ylab("Plasticity index value")+
+  xlab("Significant for LDen and SLA")+
+  scale_fill_brewer(palette="OrRd") +
+  facet_grid(trait~habitat, scales = "free_y") +
+  # coord_cartesian(ylim = c(0, 4)) +
+  scale_fill_discrete(name = "Treatments") +
+  ggtitle("Organ Structural Traits") +
+  scale_fill_grey(start = .6, end = 1) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        legend.direction="vertical",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plotAT.L =
+ggplot(data=subset(allplasL, category %in% "Allocation Traits"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_boxplot() +
+  ylab("Plasticity index value")+
+  xlab("Significant for LMR, RMR and LAR")+
+  scale_fill_brewer(palette="OrRd") +
+  facet_grid(trait~habitat, scales = "free_y") +
+  # coord_cartesian(ylim = c(0, 4)) +
+  scale_fill_discrete(name = "Treatments") +
+  ggtitle("Allocation Traits") +
+  scale_fill_grey(start = .6, end = 1) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        legend.direction="vertical",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plotGRT.L =
+ggplot(data=subset(allplasL, category %in% "Growth Rate Traits"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_boxplot() +
+  ylab("Plasticity index value")+
+  xlab("Significant for Diam_rgr and NLeaf_rgr")+
+  scale_fill_brewer(palette="OrRd") +
+  facet_grid(trait~habitat, scales = "free_y") +
+  # coord_cartesian(ylim = c(0, 5)) +
+  scale_fill_discrete(name = "Treatments") +
+  ggtitle("Growth Rate Traits") +
+  scale_fill_grey(start = .6, end = 1) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        legend.direction="vertical",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))# Select files for PDF output
+
+pdf(file="boxplot_L_category.pdf")
+
+plotOST.L
+plotAT.L
+plotGRT.L
+
+dev.off()
+```
+
+```{r plot.trait.boxplot.soil, include=F, echo=F, warning=F}
+
+allplasS = filter(allplas,
+                  treatment == "Plasticity due to soil treatment in high light" |
+                  treatment == "Plasticity due to soil treatment in low light"
+                    )
+
+plotOST.S =
+ggplot(data=subset(allplasS, category %in% "Organ Structural Traits"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_boxplot() +
+  ylab("Plasticity index value")+
+  xlab("Significant for SDen, RDen, LDen and SLA")+
+  facet_grid(trait~habitat, scales = "free_y") +
+  ggtitle("Organ Structural Traits") +
+  scale_fill_discrete(name = "Treatments") +
+  scale_fill_grey(start = .6, end = 1) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        legend.direction="vertical",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plotAT.S =
+ggplot(data=subset(allplasS, category %in% "Allocation Traits"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_boxplot() +
+  ylab("Plasticity index value")+
+  xlab("Significant for LMR, LAR and RDepth")+
+  scale_fill_brewer(palette="OrRd") +
+  facet_grid(trait~habitat, scales = "free_y") +
+  # coord_cartesian(ylim = c(0, 1)) +
+  scale_fill_discrete(name = "Treatments") +
+  ggtitle("Allocation Traits") +
+  scale_fill_grey(start = .6, end = 1) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        legend.direction="vertical",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+plotGRT.S =
+ggplot(data=subset(allplasS, category %in% "Growth Rate Traits"), 
+       aes(x=treatment, y=abs, fill = treatment)) +
+  geom_boxplot() +
+  ylab("Plasticity index value")+
+  xlab("Significant for LamArea_agr")+
+  scale_fill_brewer(palette="OrRd") +
+  facet_grid(trait~habitat, scales = "free_y") +
+  # coord_cartesian(ylim = c(0, 2)) +
+  scale_fill_discrete(name = "Treatments") +
+  ggtitle("Growth Rate Traits") +
+  scale_fill_grey(start = .6, end = 1) +
+  theme(axis.text.x = element_blank(),
+        legend.position="bottom",
+        legend.direction="vertical",
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA))
+
+pdf(file="boxplot_S_category.pdf")
+
+plotOST.S
+plotAT.S
+plotGRT.S
+
+dev.off()
+```
+
+```{r species.plas, warning=F, echo=F, include=F}
+all.traits = 
+  filter(
+    allplas,
+    trait %in% c("SDen",
+                 "RDen",
+                 "LDen",
+                 "SLA",
+                 "LamThick",
+                 "LamArea",
+                 "LMR",
+                 "RMR",
+                 "LAR",
+                 "RDepth",
+                 "PerAbov",
+                 "PerStem",
+                 "perCarbon",
+                 "perNitrogen",
+                 "CNR",
+                 "frl",
+                 "srl",
+                 "FRMR"
+                 )
+  )
+
+plas.all.traits =
+all.traits %>%
+  group_by(species, habitat, treatment) %>%
+  summarise(avg_traitPI = mean(abs, na.rm=TRUE))
+  
+all.growth = 
+  filter(
+    allplas,
+    trait %in% c("LamArea_agr",
+                 "NLeaf_agr",
+                 "TotalBm_agr",
+                 "Height_rgr",
+                 "Diam_rgr",
+                 "NLeaf_rgr")
+  )
+
+plas.all.growth =
+all.growth %>%
+  group_by(species, habitat, treatment) %>%
+  summarise(avg_growthPI = mean(abs, na.rm=TRUE))
+
+
+intersect(names(plas.all.traits),names(plas.all.growth))
+GrandPI=merge(plas.all.traits, plas.all.growth, all=TRUE)
+
+names(GrandPI)
+GrandPI = rename(GrandPI, Treatment = treatment)
+GrandPI = rename(GrandPI, Habitat = habitat)
+# GrandPI = rename(GrandPI, "Trait grand PI" = avg_traitPI)
+# GrandPI = rename(GrandPI, "Growth grand PI" = avg_growthPI)
+
+anova(
+
+  lmer(avg_traitPI~avg_growthPI + (1 | Habitat) + (1|species) + (1|Treatment), data = GrandPI)
+  
+)
+
+cor.test(GrandPI$avg_traitPI, GrandPI$avg_growthPI)
+
+traitVSgrowth = 
+ggplot(
+  data = GrandPI,
+  aes(x = avg_traitPI,
+      y = avg_growthPI,
+      color = Treatment,
+      shape = Habitat)
+) +
+  ylab("Growth grand plasticity index") +
+  xlab("Trait grand plasticity index") +
+  # scale_x_continuous(limits = c(0, 2.5)) +
+  # scale_y_continuous(limits = c(0, 2.5)) +
+  geom_point(size=rel(6)) +
+  geom_abline() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "vertical",
+    panel.background = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA)
+  )
+
+
+ggsave(
+  filename = "traitVSgrowth.png",
+  plot = traitVSgrowth, 
+  width = 6,
+  height = 7,
+  units = "in")
+```
+
+```{r traitVSgrowth, eval=F, warning=F, message=F, echo=F, include=F}
+
+plas.SDen = 
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="SDen")
+
+plas.RDen = 
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="RDen")
+
+plas.LDen = 
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="LDen")
+
+plas.SLA =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="SLA")
+  
+plas.LamThick =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="LamThick")  
+
+plas.LamArea =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="LamArea")
+  
+plas.LMR =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="LMR")
+
+plas.RMR =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="RMR")
+
+plas.LAR =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="LAR")
+
+plas.SRL =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="srl")
+
+plas.FRL =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="frl")
+
+plas.FRMR =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="FRMR")
+
+plas.RDepth =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="RDepth")
+
+plas.PerAbov =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="PerAbov")
+
+plas.PerStem =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="PerStem")
+
+plas.perCarbon =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="perCarbon")
+
+plas.perNitrogen =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="perNitrogen")
+
+plas.CNR =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="CNR")
+
+plas.LamArea_agr =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="LamArea_agr")
+
+plas.NLeaf_agr =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="NLeaf_agr")
+
+plas.TotalBm_agr =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="TotalBm_agr")
+
+plas.Height_rgr =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="Height_rgr")
+
+plas.Diam_rgr =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="Diam_rgr")
+
+plas.NLeaf_rgr =
+  select(allplas, species, treatment, trait, abs) %>%
+  filter(trait =="NLeaf_rgr")
+
+# Quick Cor test
+
+#SDen
+cor.test(plas.SDen$abs, plas.Diam_rgr$abs, method = "pearson")
+cor.test(plas.SDen$abs, plas.Height_rgr$abs, method = "pearson")
+cor.test(plas.SDen$abs, plas.LamArea_agr$abs, method = "pearson")
+cor.test(plas.SDen$abs, plas.NLeaf_agr$abs, method = "pearson")
+cor.test(plas.SDen$abs, plas.NLeaf_rgr$abs, method = "pearson")
+cor.test(plas.SDen$abs, plas.TotalBm_agr$abs, method = "pearson")
+
+#RDen
+cor.test(plas.RDen$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.RDen$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.RDen$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.RDen$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.RDen$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.RDen$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.RDen$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.RDen$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.RDen$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.RDen$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.RDen$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.RDen$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#LDen
+cor.test(plas.LDen$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LDen$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LDen$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.LDen$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.LDen$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LDen$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.LDen$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LDen$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LDen$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.LDen$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.LDen$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LDen$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#SLA
+cor.test(plas.SLA$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.SLA$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.SLA$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.SLA$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.SLA$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.SLA$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.SLA$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.SLA$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.SLA$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.SLA$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.SLA$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.SLA$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#LamThick
+cor.test(plas.LamThick$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LamThick$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LamThick$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.LamThick$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.LamThick$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LamThick$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.LamThick$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LamThick$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LamThick$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.LamThick$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.LamThick$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LamThick$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#LamArea
+cor.test(plas.LamArea$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LamArea$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LamArea$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.LamArea$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.LamArea$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LamArea$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.LamArea$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LamArea$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LamArea$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.LamArea$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.LamArea$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LamArea$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#LMR
+cor.test(plas.LMR$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LMR$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LMR$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.LMR$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.LMR$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LMR$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.LMR$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LMR$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LMR$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.LMR$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.LMR$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LMR$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#RMR
+cor.test(plas.RMR$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.RMR$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.RMR$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.RMR$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.RMR$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.RMR$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.RMR$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.RMR$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.RMR$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.RMR$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.RMR$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.RMR$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#LAR
+cor.test(plas.LAR$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LAR$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LAR$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.LAR$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.LAR$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.LAR$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.LAR$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LAR$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LAR$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.LAR$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.LAR$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.LAR$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#FRL
+cor.test(plas.FRL$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.FRL$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.FRL$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.FRL$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.FRL$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.FRL$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.FRL$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.FRL$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.FRL$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.FRL$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.FRL$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.FRL$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#SRL
+cor.test(plas.SRL$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.SRL$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.SRL$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.SRL$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.SRL$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.SRL$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.SRL$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.SRL$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.SRL$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.SRL$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.SRL$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.SRL$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#FRMR
+cor.test(plas.FRMR$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.FRMR$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.FRMR$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.FRMR$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.FRMR$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.FRMR$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.FRMR$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.FRMR$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.FRMR$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.FRMR$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.FRMR$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.FRMR$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#RDepth
+cor.test(plas.RDepth$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.RDepth$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.RDepth$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.RDepth$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.RDepth$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.RDepth$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.RDepth$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.RDepth$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.RDepth$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.RDepth$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.RDepth$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.RDepth$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#PerAbov
+cor.test(plas.PerAbov$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.PerAbov$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.PerAbov$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.PerAbov$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.PerAbov$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.PerAbov$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.PerAbov$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.PerAbov$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.PerAbov$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.PerAbov$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.PerAbov$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.PerAbov$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value 
+
+
+#PerStem
+cor.test(plas.PerStem$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.PerStem$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.PerStem$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.PerStem$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.PerStem$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.PerStem$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.PerStem$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.PerStem$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.PerStem$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.PerStem$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.PerStem$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.PerStem$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#perCarbon
+cor.test(plas.perCarbon$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.perCarbon$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.perCarbon$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.perCarbon$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.perCarbon$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.perCarbon$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.perCarbon$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.perCarbon$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.perCarbon$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.perCarbon$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.perCarbon$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.perCarbon$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#perNitrogen
+cor.test(plas.perNitrogen$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.perNitrogen$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.perNitrogen$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.perNitrogen$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.perNitrogen$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.perNitrogen$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.perNitrogen$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.perNitrogen$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.perNitrogen$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.perNitrogen$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.perNitrogen$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.perNitrogen$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+
+#CNR
+cor.test(plas.CNR$abs, plas.Diam_rgr$abs, method = "pearson")$estimate
+cor.test(plas.CNR$abs, plas.Height_rgr$abs, method = "pearson")$estimate
+cor.test(plas.CNR$abs, plas.LamArea_agr$abs, method = "pearson")$estimate
+cor.test(plas.CNR$abs, plas.NLeaf_agr$abs, method = "pearson")$estimate
+cor.test(plas.CNR$abs, plas.NLeaf_rgr$abs, method = "pearson")$estimate
+cor.test(plas.CNR$abs, plas.TotalBm_agr$abs, method = "pearson")$estimate
+
+cor.test(plas.CNR$abs, plas.Diam_rgr$abs, method = "pearson")$p.value
+cor.test(plas.CNR$abs, plas.Height_rgr$abs, method = "pearson")$p.value
+cor.test(plas.CNR$abs, plas.LamArea_agr$abs, method = "pearson")$p.value
+cor.test(plas.CNR$abs, plas.NLeaf_agr$abs, method = "pearson")$p.value
+cor.test(plas.CNR$abs, plas.NLeaf_rgr$abs, method = "pearson")$p.value
+cor.test(plas.CNR$abs, plas.TotalBm_agr$abs, method = "pearson")$p.value
+```
+
+
+```{r modelTestSDen, warning=F, message=F, echo=F, include=F}
+
+models_SDen = list(
+  lmer(stem_density ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(stem_density ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(stem_density ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(stem_density ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(stem_density ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+  
+
+fits_SDen = models_SDen
+sapply(fits_SDen, AICc)
+```
+
+```{r AIC_SDen, warning=F, echo=F}
+SDen.aic = sapply(fits_SDen, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: SDen ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: SDen ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: SDen ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: SDen ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: SDen ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(SDen.aic, digits = 5)),
+      caption="SDen: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_SDen, warning=F, echo=F}
+SDen.modFULL = lmer(stem_density ~ light * soil * habitat + (1 | plot) + (1 |species),
+               data=sub_master, REML=F)
+SDen_coefTable=anova(SDen.modFULL)
+
+knitr::kable(SDen_coefTable, 
+             digits=3,
+             caption="SDen, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_SDen_light, echo=F}
+plas_SDen_lightTab=anova(lmer(abs~ habitat*soil + (1|species),
+           data=mplas_SDen_light, REML=T))
+knitr::kable(plas_SDen_lightTab, 
+             digits=3,
+             caption="SDen plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_SDen_soil, echo=F}
+plas_SDen_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_SDen_soil, REML=T))
+
+knitr::kable(plas_SDen_soilTab, 
+             digits=3,
+             caption="SDen plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestRDen, warning=F, message=F, echo=F, include=F}
+models_RDen = list(
+  lmer(root_density ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(root_density ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(root_density ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(root_density ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(root_density ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_RDen = models_RDen
+sapply(fits_RDen, AICc)
+```
+
+```{r AIC_RDen, warning=F, echo=F}
+RDen.aic = sapply(fits_RDen, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: RDen ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: RDen ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: RDen ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: RDen ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: RDen ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(RDen.aic, digits = 5)),
+      caption="RDen: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_RDen, warning=F, echo=F}
+RDen.modFULL = lmer(root_density ~ light * soil * habitat + (1 | plot) + (1 + light|species),
+               data=sub_master, REML=F)
+RDen_coefTable=anova(RDen.modFULL)
+
+knitr::kable(RDen_coefTable, 
+             digits=3,
+             caption="RDen, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_RDen_light, echo=F}
+plas_RDen_lightTab=anova(lmer(sqrt(abs)~ habitat*soil + (1|species),
+           data=mplas_RDen_light, REML=T))
+knitr::kable(plas_RDen_lightTab, 
+             digits=3,
+             caption="RDen plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_RDen_soil, echo=F}
+plas_RDen_soilTab=anova(lmer(sqrt(abs)~ habitat*light + (1|species),
+           data=mplas_RDen_soil, REML=T))
+
+knitr::kable(plas_RDen_soilTab, 
+             digits=3,
+             caption="RDen plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestLDen, warning=F, message=F, echo=F, include=F}
+models_LDen = list(
+  lmer(leaf_density ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(leaf_density ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(leaf_density ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(leaf_density ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(leaf_density ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_LDen = models_LDen
+sapply(fits_LDen, AICc)
+```
+
+```{r AIC_LDen, warning=F, echo=F}
+LDen.aic = sapply(fits_LDen, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: LDen ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: LDen ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: LDen ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: LDen ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: LDen ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(LDen.aic, digits = 5)),
+      caption="LDen: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_LDen, warning=F, echo=F}
+LDen.modFULL = lmer(leaf_density ~ light * soil * habitat + (1 | plot) + (1 + soil|species),
+               data=sub_master, REML=F)
+LDen_coefTable=anova(LDen.modFULL)
+
+knitr::kable(LDen_coefTable, 
+             digits=3,
+             caption="LDen, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_LDen_light, echo=F}
+plas_LDen_lightTab=anova(lmer(sqrt(abs) ~ habitat*soil + (1|species),
+           data=mplas_LDen_light, REML=T))
+knitr::kable(plas_LDen_lightTab, 
+             digits=3,
+             caption="LDen plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r LDen_light_mult, eval=F, warning=F, echo=F, message=F, include=F}
+summary(LDen.modFULL)
+
+mult_LDen_light = mplas_LDen_light
+mult_LDen_light$allcomb = with(mult_LDen_light, interaction(habitat, soil))
+
+mult_LDen_light_cell = lmer(sqrt(abs) ~ allcomb -1 + (1|species), data=mult_LDen_light, REML=TRUE)
+summary(mult_LDen_light_cell)
+
+summary(
+  glht(mult_LDen_light_cell, linfct=mcp(allcomb="Tukey"))
+)
+
+mult_LDen_light_nd = with(mult_LDen_light, expand.grid(soil=unique(soil), habitat=unique(habitat)))
+mult_LDen_light_X = model.matrix(~ soil*habitat, data = mult_LDen_light_nd)
+
+
+# # Only retrieve relevant data columns
+# mplas_LDen_light_mc=melt(mplas_LDen_light, 
+#       id.vars=c("habitat", "soil"),
+#       value.name = "plasticity",
+#         measure.vars= c("abs")
+#         )
+# 
+# # Group by unique combinations of habitat and soil.
+# # Count sequence of each unique combination.
+# mplas_LDen_light_mc2 =
+#   mplas_LDen_light_mc %>% group_by(habitat, soil) %>%
+#   mutate(rep = paste(habitat, seq_along(soil)))
+# 
+# # Cast sequenced combination into usable dataframe.
+# mplas_LDen_light_mc3 =
+#   dcast(mplas_LDen_light_mc2, habitat + rep ~ soil, value.var = "plasticity")
+# 
+# multcompBoxplot(S.gu ~ habitat, data=mplas_LDen_light_mc3)
+# 
+# cplas_LDen_light_mc = dcast(mplas_LDen_light_mc, habitat + row ~ soil)
+# 
+# 
+# glht(LDen.modFULL)
+
+```
+
+```{r testPlas_LDen_soil, echo=F}
+plas_LDen_soilTab=anova(lmer(abs ~ habitat*light + (1|species),
+           data=mplas_LDen_soil, REML=T))
+
+knitr::kable(plas_LDen_soilTab, 
+             digits=3,
+             caption="LDen plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestSLA, warning=F, message=F, echo=F, include=F}
+models_SLA = list(
+  lmer(mean_sla ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(mean_sla ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(mean_sla ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(mean_sla ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(mean_sla ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_SLA = models_SLA
+sapply(fits_SLA, AICc)
+```
+
+```{r AIC_SLA, warning=F, echo=F}
+SLA.aic = sapply(fits_SLA, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: SLA ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: SLA ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: SLA ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: SLA ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: SLA ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(SLA.aic, digits = 5)),
+      caption="SLA: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_SLA, warning=F, echo=F}
+SLA.modFULL = lmer(mean_sla ~ light * soil * habitat + (1 | plot) + (1 + soil * light | species),
+               data=sub_master, REML=F)
+SLA_coefTable=anova(SLA.modFULL)
+
+knitr::kable(SLA_coefTable, 
+             digits=3,
+             caption="SLA, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_SLA_light, echo=F}
+plas_SLA_lightTab=anova(lmer(abs~ habitat*soil + (1|species),
+           data=mplas_SLA_light, REML=T))
+knitr::kable(plas_SLA_lightTab, 
+             digits=3,
+             caption="SLA plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r SLA_light_mult, eval = F, warning=F, echo=F, message=F, include=F}
+summary(SLA.modFULL)
+
+mult_SLA_light = mplas_SLA_light
+mult_SLA_light$allcomb = with(mult_SLA_light, interaction(habitat, soil))
+
+mult_SLA_light_cell = lmer(log(abs) ~ allcomb -1 + (1|species), data=mult_SLA_light, REML=TRUE)
+summary(mult_SLA_light_cell)
+
+summary(
+  glht(mult_SLA_light_cell, linfct=mcp(allcomb="Tukey"))
+)
+```
+
+```{r testPlas_SLA_soil, echo=F}
+plas_SLA_soilTab=anova(lmer(abs~ habitat*light + (1|species),
+           data=mplas_SLA_soil, REML=T))
+
+knitr::kable(plas_SLA_soilTab, 
+             digits=3,
+             caption="SLA plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestLamThick, warning=F, message=F, echo=F, include=F}
+models_LamThick = list(
+  lmer(avg_thickness_mm ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(avg_thickness_mm ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(avg_thickness_mm ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(avg_thickness_mm ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(avg_thickness_mm ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_LamThick = models_LamThick
+sapply(fits_LamThick, AICc)
+```
+
+```{r AIC_LamThick, warning=F, echo=F}
+LamThick.aic = sapply(fits_LamThick, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: LamThick ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: LamThick ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: LamThick ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: LamThick ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: LamThick ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(LamThick.aic, digits = 5)),
+      caption="LamThick: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_LamThick, warning=F, echo=F}
+LamThick.modFULL = lmer(avg_thickness_mm ~ light * soil * habitat + (1 | plot) + (1 | species),
+               data=sub_master, REML=F)
+LamThick_coefTable=anova(LamThick.modFULL)
+
+knitr::kable(LamThick_coefTable, 
+             digits=3,
+             caption="LamThick, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_LamThick_light, echo=F}
+plas_LamThick_lightTab=anova(lmer(abs~ habitat*soil + (1|species),
+           data=mplas_LamThick_light, REML=T))
+knitr::kable(plas_LamThick_lightTab, 
+             digits=3,
+             caption="LamThick plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_LamThick_soil, echo=F}
+plas_LamThick_soilTab=anova(lmer(sqrt(abs)~ habitat*light + (1|species),
+           data=mplas_LamThick_soil, REML=T))
+
+knitr::kable(plas_LamThick_soilTab, 
+             digits=3,
+             caption="LamThick plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestLamArea, warning=F, message=F, echo=F, include=F}
+models_LamArea = list(
+  lmer(log(mean_leaf_area) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(log(mean_leaf_area) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(log(mean_leaf_area) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(log(mean_leaf_area) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(log(mean_leaf_area) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_LamArea = models_LamArea
+sapply(fits_LamArea, AICc)
+```
+
+```{r AIC_LamArea, warning=F, echo=F}
+LamArea.aic = sapply(fits_LamArea, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: log(LamArea) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: log(LamArea) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: log(LamArea) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: log(LamArea) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: log(LamArea) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(LamArea.aic, digits = 5)),
+      caption="LamArea: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_LamArea, warning=F, echo=F}
+LamArea.modFULL = lmer(log(mean_leaf_area) ~ light * soil * habitat + (1 | plot) + (1 + soil * light|species),
+               data=sub_master, REML=F)
+LamArea_coefTable=anova(LamArea.modFULL)
+
+knitr::kable(LamArea_coefTable, 
+             digits=3,
+             caption="LamArea, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_LamArea_light, echo=F}
+plas_LamArea_lightTab=anova(lmer(abs ~ habitat*soil + (1|species),
+           data=mplas_LamArea_light, REML=T))
+knitr::kable(plas_LamArea_lightTab, 
+             digits=3,
+             caption="LamArea plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_LamArea_soil, echo=F}
+plas_LamArea_soilTab=anova(lmer(abs~ habitat*light + (1|species),
+           data=mplas_LamArea_soil, REML=T))
+
+knitr::kable(plas_LamArea_soilTab, 
+             digits=3,
+             caption="LamArea plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestLMR, warning=F, message=F, echo=F, include=F}
+models_LMR = list(
+  lmer(lmr ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(lmr ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(lmr ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(lmr ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(lmr ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_LMR = models_LMR
+sapply(fits_LMR, AICc)
+```
+
+```{r AIC_LMR, warning=F, echo=F}
+LMR.aic = sapply(fits_LMR, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: LMR ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: LMR ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: LMR ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: LMR ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: LMR ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(LMR.aic, digits = 5)),
+      caption="LMR: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_LMR, warning=F, echo=F}
+LMR.modFULL = lmer(root_density ~ light * soil * habitat + (1 | plot) + (1 | species),
+               data=sub_master, REML=F)
+LMR_coefTable=anova(LMR.modFULL)
+
+knitr::kable(LMR_coefTable, 
+             digits=3,
+             caption="LMR, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_LMR_light, echo=F}
+plas_LMR_lightTab=anova(lmer(sqrt(abs) ~ habitat*soil + (1|species),
+           data=mplas_LMR_light, REML=T))
+knitr::kable(plas_LMR_lightTab, 
+             digits=3,
+             caption="LMR plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_LMR_soil, echo=F}
+plas_LMR_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_LMR_soil, REML=T))
+
+knitr::kable(plas_LMR_soilTab, 
+             digits=3,
+             caption="LMR plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestRMR, warning=F, message=F, echo=F, include=F}
+models_RMR = list(
+  lmer(sqrt(rmr) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(sqrt(rmr) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(sqrt(rmr) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(sqrt(rmr) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(sqrt(rmr) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_RMR = models_RMR
+sapply(fits_RMR, AICc)
+```
+
+```{r AIC_RMR, warning=F, echo=F}
+RMR.aic = sapply(fits_RMR, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: sqrt(RMR) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: sqrt(RMR) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: sqrt(RMR) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: sqrt(RMR) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: sqrt(RMR) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(RMR.aic, digits = 5)),
+      caption="RMR: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_RMR, warning=F, echo=F}
+RMR.modFULL = lmer(sqrt(rmr) ~ light * soil * habitat + (1 | plot) + (1 |species),
+               data=sub_master, REML=F)
+RMR_coefTable=anova(RMR.modFULL)
+
+knitr::kable(RMR_coefTable, 
+             digits=3,
+             caption="RMR, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_RMR_light, echo=F}
+plas_RMR_lightTab=anova(lmer(log(abs) ~ habitat*soil + (1|species),
+           data=mplas_RMR_light, REML=T))
+knitr::kable(plas_RMR_lightTab, 
+             digits=3,
+             caption="RMR plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_RMR_soil, echo=F}
+plas_RMR_soilTab=anova(lmer(log(abs) ~ habitat*light + (1|species),
+           data=mplas_RMR_soil, REML=T))
+
+anova(lmer(log(abs) ~ habitat*light + (1|species),
+           data=mplas_RMR_soil, REML=T), ddf = "Kenward-Roger")
+
+knitr::kable(plas_RMR_soilTab, 
+             digits=3,
+             caption="RMR plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestLAR, warning=F, message=F, echo=F, include=F}
+models_LAR = list(
+  lmer(sqrt(lar) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(sqrt(lar) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(sqrt(lar) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(sqrt(lar) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(sqrt(lar) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_LAR = models_LAR
+sapply(fits_LAR, AICc)
+```
+
+```{r AIC_LAR, warning=F, echo=F}
+LAR.aic = sapply(fits_LAR, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: sqrt(LAR) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: sqrt(LAR) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: sqrt(LAR) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: sqrt(LAR) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: sqrt(LAR) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(LAR.aic, digits = 5)),
+      caption="LAR: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_LAR, warning=F, echo=F}
+LAR.modFULL = lmer(lar ~ light * soil * habitat + (1 | plot) + (1 + soil * light | species),
+               data=sub_master, REML=F)
+LAR_coefTable=anova(LAR.modFULL)
+
+knitr::kable(LAR_coefTable, 
+             digits=3,
+             caption="LAR, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_LAR_light, echo=F}
+plas_LAR_lightTab=anova(lmer(sqrt(abs) ~ habitat*soil + (1|species),
+           data=mplas_LAR_light, REML=T))
+knitr::kable(plas_LAR_lightTab, 
+             digits=3,
+             caption="LAR plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_LAR_soil, echo=F}
+plas_LAR_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_LAR_soil, REML=T))
+
+knitr::kable(plas_LAR_soilTab, 
+             digits=3,
+             caption="LAR plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestfrl, warning=F, message=F, echo=F, include=F}
+models_frl = list(
+  lmer(sqrt(frl) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(sqrt(frl) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(sqrt(frl) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(sqrt(frl) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(sqrt(frl) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_frl = models_frl
+sapply(fits_frl, AICc)
+```
+
+```{r AIC_frl, warning=F, echo=F}
+frl.aic = sapply(fits_frl, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: sqrt(frl) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: sqrt(frl) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: sqrt(frl) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: sqrt(frl) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: sqrt(frl) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(frl.aic, digits = 5)),
+      caption="frl: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_frl, warning=F, echo=F}
+frl.modFULL = lmer(sqrt(frl) ~ light * soil * habitat + (1 | plot) + (1 | species),
+               data=sub_master, REML=F)
+frl_coefTable=anova(frl.modFULL)
+
+knitr::kable(frl_coefTable, 
+             digits=3,
+             caption="frl, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_frl_light, echo=F}
+plas_frl_lightTab=anova(lmer(sqrt(abs) ~ habitat*soil + (1|species),
+           data=mplas_frl_light, REML=T))
+knitr::kable(plas_frl_lightTab, 
+             digits=3,
+             caption="frl plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_frl_soil, echo=F}
+plas_frl_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_frl_soil, REML=T), ddf = "lme4")
+
+frl_soil = read.csv("frl_soil.csv")
+head(frl_soil, 2)
+anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data = frl_soil, REML = T),
+      ddf="Kenward-Roger")
+
+
+# From SAS: Type 3 Tests of Fixed Effects
+# Effect 	Num DF 	Den DF 	F Value 	Pr > F
+# habitat 	2 	10 	1.11 	0.3681
+# light 	1 	10 	0.45 	0.5159
+# habitat*light 	2 	10 	0.27 	0.7716
+
+knitr::kable(plas_frl_soilTab, 
+             digits=3,
+             caption="frl plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestsrl, warning=F, message=F, echo=F, include=F}
+models_srl = list(
+  lmer(log(srl) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(log(srl) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(log(srl) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(log(srl) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(log(srl) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_srl = models_srl
+sapply(fits_srl, AICc)
+```
+
+```{r AIC_srl, warning=F, echo=F}
+srl.aic = sapply(fits_srl, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: log(srl) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: log(srl) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: log(srl) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: log(srl) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: log(srl) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(srl.aic, digits = 5)),
+      caption="srl: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_srl, warning=F, echo=F}
+srl.modFULL = lmer(log(srl) ~ light * soil * habitat + (1 | plot) + (1 + light|species),
+               data=sub_master, REML=F)
+srl_coefTable=anova(srl.modFULL)
+
+knitr::kable(srl_coefTable, 
+             digits=3,
+             caption="srl, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_srl_light, echo=F}
+plas_srl_lightTab=anova(lmer(sqrt(abs) ~ habitat*soil + (1|species),
+           data=mplas_srl_light, REML=T))
+knitr::kable(plas_srl_lightTab, 
+             digits=3,
+             caption="srl plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_srl_soil, echo=F}
+plas_srl_soilTab=anova(lmer(log(abs) ~ habitat*light + (1|species),
+           data=mplas_srl_soil, REML=T))
+
+# Type 3 Tests of Fixed Effects in SAS
+# Effect 	Num DF 	Den DF 	F Value 	Pr > F
+# habitat 	2 	2 	0.45 	0.6885
+# light 	1 	2 	11.70 	0.0759
+# habitat*light 	2 	2 	53.95 	0.0182
+
+knitr::kable(plas_srl_soilTab, 
+             digits=3,
+             caption="srl plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestFRMR, warning=F, message=F, echo=F, include=F}
+models_FRMR = list(
+  lmer(log(FRMR) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(log(FRMR) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(log(FRMR) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(log(FRMR) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(log(FRMR) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_FRMR = models_FRMR
+sapply(fits_FRMR, AICc)
+```
+
+```{r AIC_FRMR, warning=F, echo=F}
+FRMR.aic = sapply(fits_FRMR, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: log(FRMR) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: log(FRMR) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: log(FRMR) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: log(FRMR) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: log(FRMR) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(FRMR.aic, digits = 5)),
+      caption="FRMR: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_FRMR, warning=F, echo=F}
+FRMR.modFULL = lmer(log(FRMR) ~ light * soil * habitat + (1 | plot) + (1 + light),
+               data=sub_master, REML=F)
+FRMR_coefTable=anova(FRMR.modFULL)
+
+knitr::kable(FRMR_coefTable, 
+             digits=3,
+             caption="FRMR, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_FRMR_light, echo=F}
+plas_FRMR_lightTab=anova(lmer(sqrt(abs) ~ habitat*soil + (1|species),
+           data=mplas_FRMR_light, REML=T))
+knitr::kable(plas_FRMR_lightTab, 
+             digits=3,
+             caption="FRMR plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_FRMR_soil, echo=F}
+plas_FRMR_soilTab=anova(lmer(log(abs) ~ habitat*light + (1|species),
+           data=mplas_FRMR_soil, REML=T))
+
+# Type 3 Tests of Fixed Effects in SAS
+# Effect 	Num DF 	Den DF 	F Value 	Pr > F
+# habitat 	2 	2 	0.45 	0.6885
+# light 	1 	2 	11.70 	0.0759
+# habitat*light 	2 	2 	53.95 	0.0182
+
+knitr::kable(plas_FRMR_soilTab, 
+             digits=3,
+             caption="FRMR plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestperCarbon, warning=F, message=F, echo=F, include=F}
+models_perCarbon = list(
+  lmer((perCarbon) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer((perCarbon) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer((perCarbon) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer((perCarbon) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer((perCarbon) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_perCarbon = models_perCarbon
+sapply(fits_perCarbon, AICc)
+```
+
+```{r AIC_perCarbon, warning=F, echo=F}
+perCarbon.aic = sapply(fits_perCarbon, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: (perCarbon) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: (perCarbon) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: (perCarbon) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: (perCarbon) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: (perCarbon) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(perCarbon.aic, digits = 5)),
+      caption="perCarbon: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_perCarbon, warning=F, echo=F}
+perCarbon.modFULL = lmer((perCarbon) ~ light * soil * habitat + (1 | plot) + (1 | species),
+               data=sub_master, REML=F)
+perCarbon_coefTable=anova(perCarbon.modFULL)
+
+knitr::kable(perCarbon_coefTable, 
+             digits=3,
+             caption="perCarbon, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_perCarbon_light, echo=F}
+plas_perCarbon_lightTab=anova(lmer(log(abs) ~ habitat*soil + (1|species),
+           data=mplas_perCarbon_light, REML=T))
+knitr::kable(plas_perCarbon_lightTab, 
+             digits=3,
+             caption="perCarbon plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_perCarbon_soil, echo=F}
+plas_perCarbon_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_perCarbon_soil, REML=T))
+
+# Type 3 Tests of Fixed Effects in SAS
+# Effect 	Num DF 	Den DF 	F Value 	Pr > F
+# habitat 	2 	2 	0.45 	0.6885
+# light 	1 	2 	11.70 	0.0759
+# habitat*light 	2 	2 	53.95 	0.0182
+
+knitr::kable(plas_perCarbon_soilTab, 
+             digits=3,
+             caption="perCarbon plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestperNitrogen, warning=F, message=F, echo=F, include=F}
+models_perNitrogen = list(
+  lmer((perNitrogen) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer((perNitrogen) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer((perNitrogen) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer((perNitrogen) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer((perNitrogen) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_perNitrogen = models_perNitrogen
+sapply(fits_perNitrogen, AICc)
+```
+
+```{r AIC_perNitrogen, warning=F, echo=F}
+perNitrogen.aic = sapply(fits_perNitrogen, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: (perNitrogen) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: (perNitrogen) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: (perNitrogen) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: (perNitrogen) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: (perNitrogen) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(perNitrogen.aic, digits = 5)),
+      caption="perNitrogen: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_perNitrogen, warning=F, echo=F}
+perNitrogen.modFULL = lmer((perNitrogen) ~ light * soil * habitat + (1 | plot) + (1 | species),
+               data=sub_master, REML=F)
+perNitrogen_coefTable=anova(perNitrogen.modFULL)
+
+knitr::kable(perNitrogen_coefTable, 
+             digits=3,
+             caption="perNitrogen, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_perNitrogen_light, echo=F}
+plas_perNitrogen_lightTab=anova(lmer(sqrt(abs) ~ habitat*soil + (1|species),
+           data=mplas_perNitrogen_light, REML=T))
+knitr::kable(plas_perNitrogen_lightTab, 
+             digits=3,
+             caption="perNitrogen plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_perNitrogen_soil, echo=F}
+plas_perNitrogen_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_perNitrogen_soil, REML=T))
+
+# Type 3 Tests of Fixed Effects in SAS
+# Effect 	Num DF 	Den DF 	F Value 	Pr > F
+# habitat 	2 	2 	0.45 	0.6885
+# light 	1 	2 	11.70 	0.0759
+# habitat*light 	2 	2 	53.95 	0.0182
+
+knitr::kable(plas_perNitrogen_soilTab, 
+             digits=3,
+             caption="perNitrogen plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+
+```{r modelTestCNR, warning=F, message=F, echo=F, include=F}
+models_CNR = list(
+  lmer((CNR) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer((CNR) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer((CNR) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer((CNR) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer((CNR) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_CNR = models_CNR
+sapply(fits_CNR, AICc)
+```
+
+```{r AIC_CNR, warning=F, echo=F}
+CNR.aic = sapply(fits_CNR, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: (CNR) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: (CNR) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: (CNR) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: (CNR) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: (CNR) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(CNR.aic, digits = 5)),
+      caption="CNR: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_CNR, warning=F, echo=F}
+CNR.modFULL = lmer((CNR) ~ light * soil * habitat + (1 | plot) + (1 + soil | species),
+               data=sub_master, REML=F)
+CNR_coefTable=anova(CNR.modFULL)
+
+knitr::kable(CNR_coefTable, 
+             digits=3,
+             caption="CNR, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_CNR_light, echo=F}
+plas_CNR_lightTab=anova(lmer(sqrt(abs) ~ habitat*soil + (1|species),
+           data=mplas_CNR_light, REML=T))
+knitr::kable(plas_CNR_lightTab, 
+             digits=3,
+             caption="CNR plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_CNR_soil, echo=F}
+plas_CNR_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_CNR_soil, REML=T))
+
+# Type 3 Tests of Fixed Effects in SAS
+# Effect 	Num DF 	Den DF 	F Value 	Pr > F
+# habitat 	2 	2 	0.45 	0.6885
+# light 	1 	2 	11.70 	0.0759
+# habitat*light 	2 	2 	53.95 	0.0182
+
+knitr::kable(plas_CNR_soilTab, 
+             digits=3,
+             caption="CNR plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestRDepth, warning=F, message=F, echo=F, include=F}
+models_RDepth = list(
+  lmer(depth^0.33 ~ light*soil*habitat + (1 | plot) + (1 | species), data = sub_master),
+  lmer(depth^0.33 ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(depth^0.33 ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(depth^0.33 ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(depth^0.33 ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_RDepth = models_RDepth
+sapply(fits_RDepth, AICc)
+```
+
+```{r AIC_RDepth, warning=F, echo=F}
+RDepth.aic = sapply(fits_RDepth, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: RDepth^0.33 ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: RDepth^0.33 ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: RDepth^0.33 ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: RDepth^0.33 ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: RDepth^0.33 ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(RDepth.aic, digits = 5)),
+      caption="RDepth: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_RDepth, warning=F, echo=F}
+RDepth.modFULL = lmer(depth^0.33 ~ light * soil * habitat + (1 | plot) + (1 | species),
+               data=sub_master, REML=F)
+RDepth_coefTable=anova(RDepth.modFULL)
+
+knitr::kable(RDepth_coefTable, 
+             digits=3,
+             caption="RDepth, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_RDepth_light, echo=F}
+plas_RDepth_lightTab=anova(lmer(log(abs) ~ habitat*soil + (1|species),
+           data=mplas_RDepth_light, REML=T))
+knitr::kable(plas_RDepth_lightTab, 
+             digits=3,
+             caption="RDepth plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_RDepth_soil, echo=F}
+plas_RDepth_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_RDepth_soil, REML=T))
+
+knitr::kable(plas_RDepth_soilTab, 
+             digits=3,
+             caption="RDepth plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestPerAbov, warning=F, message=F, echo=F, include=F}
+models_PerAbov = list(
+  lmer(per_above ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(per_above ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(per_above ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(per_above ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(per_above ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_PerAbov = models_PerAbov
+sapply(fits_PerAbov, AICc)
+```
+
+```{r AIC_PerAbov, warning=F, echo=F}
+PerAbov.aic = sapply(fits_PerAbov, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: PerAbov ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: PerAbov ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: PerAbov ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: PerAbov ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: PerAbov ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(PerAbov.aic, digits = 5)),
+      caption="PerAbov: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_PerAbov, warning=F, echo=F}
+PerAbov.modFULL = lmer(per_above ~ light * soil * habitat + (1 | plot) + (1 | species),
+               data=sub_master, REML=F)
+PerAbov_coefTable=anova(PerAbov.modFULL)
+
+knitr::kable(PerAbov_coefTable, 
+             digits=3,
+             caption="PerAbov, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_PerAbov_light, echo=F}
+plas_PerAbov_lightTab=anova(lmer(log(abs) ~ habitat*soil + (1|species),
+           data=mplas_PerAbov_light, REML=T))
+knitr::kable(plas_PerAbov_lightTab, 
+             digits=3,
+             caption="PerAbov plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_PerAbov_soil, echo=F}
+plas_PerAbov_soilTab=anova(lmer(log(abs) ~ habitat*light + (1|species),
+           data=mplas_PerAbov_soil, REML=T))
+
+knitr::kable(plas_PerAbov_soilTab, 
+             digits=3,
+             caption="PerAbov plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestPerStem, warning=F, message=F, echo=F, include=F}
+models_PerStem = list(
+  lmer(per_stem_weight ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(per_stem_weight ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(per_stem_weight ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(per_stem_weight ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(per_stem_weight ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_PerStem = models_PerStem
+sapply(fits_PerStem, AICc)
+```
+
+```{r AIC_PerStem, warning=F, echo=F}
+PerStem.aic = sapply(fits_PerStem, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: PerStem ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: PerStem ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: PerStem ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: PerStem ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: PerStem ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(PerStem.aic, digits = 5)),
+      caption="PerStem: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_PerStem, warning=F, echo=F}
+PerStem.modFULL = lmer(per_stem_weight ~ light * soil * habitat + (1 | plot) + (1 |species),
+               data=sub_master, REML=F)
+PerStem_coefTable=anova(PerStem.modFULL)
+
+knitr::kable(PerStem_coefTable, 
+             digits=3,
+             caption="PerStem, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_PerStem_light, echo=F}
+plas_PerStem_lightTab=anova(lmer(abs~ habitat*soil + (1|species),
+           data=mplas_PerStem_light, REML=T))
+knitr::kable(plas_PerStem_lightTab, 
+             digits=3,
+             caption="PerStem plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_PerStem_soil, echo=F}
+plas_PerStem_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_PerStem_soil, REML=T))
+
+knitr::kable(plas_PerStem_soilTab, 
+             digits=3,
+             caption="PerStem plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestLamArea_agr, warning=F, message=F, echo=F, include=F}
+models_LamArea_agr = list(
+  lmer(log(leaf_area_agr) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(log(leaf_area_agr) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(log(leaf_area_agr) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(log(leaf_area_agr) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(log(leaf_area_agr) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_LamArea_agr = models_LamArea_agr
+sapply(fits_LamArea_agr, AICc)
+```
+
+```{r AIC_LamArea_agr, warning=F, echo=F}
+LamArea_agr.aic = sapply(fits_LamArea_agr, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: log(LamArea_agr) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: log(LamArea_agr) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: log(LamArea_agr) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: log(LamArea_agr) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: log(LamArea_agr) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(LamArea_agr.aic, digits = 5)),
+      caption="LamArea_agr: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_LamArea_agr, warning=F, echo=F}
+LamArea_agr.modFULL = lmer(leaf_area_agr ~ light * soil * habitat + (1 | plot) + (1 | species),
+               data=sub_master, REML=F)
+LamArea_agr_coefTable=anova(LamArea_agr.modFULL)
+
+knitr::kable(LamArea_agr_coefTable, 
+             digits=3,
+             caption="LamArea_agr, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_LamArea_agr_light, echo=F}
+plas_LamArea_agr_lightTab=anova(lmer(log(abs) ~ habitat*soil + (1|species),
+           data=mplas_LamArea_agr_light, REML=T))
+knitr::kable(plas_LamArea_agr_lightTab, 
+             digits=3,
+             caption="LamArea_agr plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_LamArea_agr_soil, echo=F}
+plas_LamArea_agr_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_LamArea_agr_soil, REML=T))
+
+knitr::kable(plas_LamArea_agr_soilTab, 
+             digits=3,
+             caption="LamArea_agr plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestNLeaf_agr, warning=F, message=F, echo=F, include=F}
+models_NLeaf_agr = list(
+  lmer(log(nleaf_gr) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(log(nleaf_gr) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(log(nleaf_gr) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(log(nleaf_gr) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(log(nleaf_gr) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_NLeaf_agr = models_NLeaf_agr
+sapply(fits_NLeaf_agr, AICc)
+```
+
+```{r AIC_NLeaf_agr, warning=F, echo=F}
+NLeaf_agr.aic = sapply(fits_NLeaf_agr, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: log(NLeaf_agr) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: log(NLeaf_agr) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: log(NLeaf_agr) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: log(NLeaf_agr) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: log(NLeaf_agr) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(NLeaf_agr.aic, digits = 5)),
+      caption="NLeaf_agr: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_NLeaf_agr, warning=F, echo=F}
+NLeaf_agr.modFULL = lmer(nleaf_gr ~ light * soil * habitat + (1 | plot) + (1 |species),
+               data=sub_master, REML=F)
+NLeaf_agr_coefTable=anova(NLeaf_agr.modFULL)
+
+knitr::kable(NLeaf_agr_coefTable, 
+             digits=3,
+             caption="NLeaf_agr, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_NLeaf_agr_light, echo=F}
+plas_NLeaf_agr_lightTab=anova(lmer(sqrt(abs) ~ habitat*soil + (1|species),
+           data=mplas_NLeaf_agr_light, REML=T))
+knitr::kable(plas_NLeaf_agr_lightTab, 
+             digits=3,
+             caption="NLeaf_agr plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_NLeaf_agr_soil, echo=F}
+plas_NLeaf_agr_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_NLeaf_agr_soil, REML=T))
+
+knitr::kable(plas_NLeaf_agr_soilTab, 
+             digits=3,
+             caption="NLeaf_agr plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestTotalBm_agr, warning=F, message=F, echo=F, include=F}
+models_TotalBm_agr = list(
+  lmer(log(total_bm_agr) ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(log(total_bm_agr) ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(log(total_bm_agr) ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(log(total_bm_agr) ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(log(total_bm_agr) ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_TotalBm_agr = models_TotalBm_agr
+sapply(fits_TotalBm_agr, AICc)
+```
+
+```{r AIC_TotalBm_agr, warning=F, echo=F}
+TotalBm_agr.aic = sapply(fits_TotalBm_agr, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: log(TotalBm_agr) ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: log(TotalBm_agr) ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: log(TotalBm_agr) ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: log(TotalBm_agr) ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: log(TotalBm_agr) ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(TotalBm_agr.aic, digits = 5)),
+      caption="TotalBm_agr: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_TotalBm_agr, warning=F, echo=F}
+TotalBm_agr.modFULL = lmer(log(total_bm_agr) ~ light * soil * habitat + (1 | plot) + (1 + light|species),
+               data=sub_master, REML=F)
+TotalBm_agr_coefTable=anova(TotalBm_agr.modFULL)
+
+knitr::kable(TotalBm_agr_coefTable, 
+             digits=3,
+             caption="TotalBm_agr, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_TotalBm_agr_light, echo=F}
+plas_TotalBm_agr_lightTab=anova(lmer(log(abs) ~ habitat*soil + (1|species),
+           data=mplas_TotalBm_agr_light, REML=T))
+knitr::kable(plas_TotalBm_agr_lightTab, 
+             digits=3,
+             caption="TotalBm_agr plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_TotalBm_agr_soil, echo=F}
+plas_TotalBm_agr_soilTab=anova(lmer(sqrt(abs) ~ habitat*light + (1|species),
+           data=mplas_TotalBm_agr_soil, REML=T))
+
+knitr::kable(plas_TotalBm_agr_soilTab, 
+             digits=3,
+             caption="TotalBm_agr plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestHeight_rgr, warning=F, message=F, echo=F, include=F}
+models_Height_rgr = list(
+  lmer(height_rgr ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(height_rgr ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(height_rgr ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(height_rgr ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(height_rgr ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_Height_rgr = models_Height_rgr
+sapply(fits_Height_rgr, AICc)
+```
+
+```{r AIC_Height_rgr, warning=F, echo=F}
+Height_rgr.aic = sapply(fits_Height_rgr, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: Height_rgr ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: Height_rgr ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: Height_rgr ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: Height_rgr ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: Height_rgr ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(Height_rgr.aic, digits = 5)),
+      caption="Height_rgr: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_Height_rgr, warning=F, echo=F}
+Height_rgr.modFULL = lmer(height_rgr ~ light * soil * habitat + (1 | plot) + (1 |species),
+               data=sub_master, REML=F)
+Height_rgr_coefTable=anova(Height_rgr.modFULL)
+
+knitr::kable(Height_rgr_coefTable, 
+             digits=3,
+             caption="Height_rgr, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_Height_rgr_light, echo=F}
+plas_Height_rgr_lightTab=anova(lmer(abs~ habitat*soil + (1|species),
+           data=mplas_Height_rgr_light, REML=T))
+knitr::kable(plas_Height_rgr_lightTab, 
+             digits=3,
+             caption="Height_rgr plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_Height_rgr_soil, echo=F}
+plas_Height_rgr_soilTab=anova(lmer(log(abs) ~ habitat*light + (1|species),
+           data=mplas_Height_rgr_soil, REML=T))
+
+knitr::kable(plas_Height_rgr_soilTab, 
+             digits=3,
+             caption="Height_rgr plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestmplas_Diam_rgr, warning=F, message=F, echo=F, include=F}
+models_Diam_rgr = list(
+  lmer(diameter_rgr ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(diameter_rgr ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(diameter_rgr ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(diameter_rgr ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(diameter_rgr ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_Diam_rgr = models_Diam_rgr
+sapply(fits_Diam_rgr, AICc)
+```
+
+```{r AIC_mplas_Diam_rgr, warning=F, echo=F}
+Diam_rgr.aic = sapply(fits_Diam_rgr, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: Diam_rgr ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: Diam_rgr ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: Diam_rgr ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: Diam_rgr ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: Diam_rgr ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(Diam_rgr.aic, digits = 5)),
+      caption="Diam_rgr: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_Diam_rgr, warning=F, echo=F}
+Diam_rgr.modFULL = lmer(diameter_rgr ~ light * soil * habitat + (1 | plot) + (1 + light|species),
+               data=sub_master, REML=F)
+Diam_rgr_coefTable=anova(Diam_rgr.modFULL)
+
+knitr::kable(Diam_rgr_coefTable, 
+             digits=3,
+             caption="Diam_rgr, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_Diam_rgr_light, echo=F}
+plas_Diam_rgr_lightTab=anova(lmer(log(abs) ~ habitat*soil + (1|species),
+           data=mplas_Diam_rgr_light, REML=T))
+knitr::kable(plas_Diam_rgr_lightTab, 
+             digits=3,
+             caption="Diam_rgr plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_Diam_rgr_soil, echo=F}
+plas_Diam_rgr_soilTab=anova(lmer(log(abs) ~ habitat*light + (1|species),
+           data=mplas_Diam_rgr_soil, REML=T))
+
+knitr::kable(plas_Diam_rgr_soilTab, 
+             digits=3,
+             caption="Diam_rgr plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+\pagebreak
+```{r modelTestNLeaf_rgr, warning=F, message=F, echo=F, include=F}
+models_NLeaf_rgr = list(
+  lmer(nleaf_rgr ~ light*soil*habitat + (1 | plot) + (1|species), data = sub_master),
+  lmer(nleaf_rgr ~ light*soil*habitat + (1 | plot) + (1 + soil*light|species), data = sub_master),
+  lmer(nleaf_rgr ~ light*soil*habitat + (1 | plot) + (1 + soil+light|species), data = sub_master),
+  lmer(nleaf_rgr ~ light*soil*habitat + (1 | plot) + (1 + soil|species), data = sub_master),
+  lmer(nleaf_rgr ~ light*soil*habitat + (1 | plot) + (1 + light|species), data = sub_master)
+)
+
+fits_NLeaf_rgr = models_NLeaf_rgr
+sapply(fits_NLeaf_rgr, AICc)
+```
+
+```{r AIC_NLeaf_rgr, warning=F, echo=F}
+NLeaf_rgr.aic = sapply(fits_NLeaf_rgr, AICc)
+knitr::kable(data.frame(Model = c(
+  "Model 1: NLeaf_rgr ~ light * soil * habitat + (1 | plot) + (1|species)",
+  "Model 2: NLeaf_rgr ~ light * soil * habitat + (1 | plot) + (1+ soil * light|species)",
+  "Model 3: NLeaf_rgr ~ light * soil * habitat + (1 | plot) + (1 + soil + light|species)",
+  "Model 4: NLeaf_rgr ~ light * soil * habitat + (1 | plot) + (1 + soil|species)",
+  "Model 5: NLeaf_rgr ~ light * soil * habitat + (1 | plot) + (1 + light|species)"
+  ), 
+      AICc = format(NLeaf_rgr.aic, digits = 5)),
+      caption="NLeaf_rgr: Testing the global model with variations in slope randomization for the random effects")
+```
+
+```{r CoefTable_NLeaf_rgr, warning=F, echo=F}
+NLeaf_rgr.modFULL = lmer(nleaf_rgr ~ light * soil * habitat + (1 | plot) + (1 + light|species),
+               data=sub_master, REML=F)
+NLeaf_rgr_coefTable=anova(NLeaf_rgr.modFULL)
+
+knitr::kable(NLeaf_rgr_coefTable, 
+             digits=3,
+             caption="NLeaf_rgr, analysis of Variance Table of type III  with  Satterthwaite 
+approximation for degrees of freedom")
+```
+
+```{r testPlas_NLeaf_rgr_light, echo=F}
+plas_NLeaf_rgr_lightTab=anova(lmer(log(abs) ~ habitat*soil + (1|species),
+           data=mplas_NLeaf_rgr_light, REML=T))
+knitr::kable(plas_NLeaf_rgr_lightTab, 
+             digits=3,
+             caption="NLeaf_rgr plasticity due to light, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
+
+```{r testPlas_NLeaf_rgr_soil, echo=F}
+plas_NLeaf_rgr_soilTab=anova(lmer(log(abs) ~ habitat*light + (1|species),
+           data=mplas_NLeaf_rgr_soil, REML=T))
+
+knitr::kable(plas_NLeaf_rgr_soilTab, 
+             digits=3,
+             caption="NLeaf_rgr plasticity due to soil, analysis of Variance Table of type III  with  Satterthwaite approximation for degrees of freedom. Habitat refers to the soil specialization of the plant.")
+```
